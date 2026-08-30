@@ -26,40 +26,52 @@ The selection engine is identical in both modes; only the tiles change.
 ## Tests
 
 ```
-node test-selection.js   # 14 assertions on the selection engine
-python3 test_ui.py       # 16 assertions driving the real browser + screenshots
+node test-selection.js        # 14 assertions on the selection engine
+python3 test_ui.py            # 16 assertions driving the real browser + screenshots
+node server/test_geocoder.js  # 16 assertions on the geocoder (stubbed fetch, no cost)
+node server/test_api.js       # 32 assertions: real Express + real MySQL + real HTTP
 ```
 
-`test_ui.py` re-implements point-in-polygon independently and asserts the on-screen list
-matches it exactly — so the test fails if the UI and the engine ever disagree. Both suites
-include control positives, so an empty result can't be mistaken for a passing filter.
+`test_ui.py` and `test_api.js` both re-implement point-in-polygon independently and assert
+the result matches — so they fail if the UI, the API and the engine ever disagree. Every
+suite includes control positives, so an empty result can't be mistaken for a passing filter.
 
 Screenshots land in `shots/`.
 
-## How this maps onto your stack
+### Running the API tests
 
-Your CRM: React + TypeScript front end, Node + Express back end, VPS on Hostinger.
+They need a MySQL on `127.0.0.1:13306` with a migrated `crmtest` database. A throwaway one:
 
-### 1. Store location fields
-
-```sql
--- PostgreSQL
-ALTER TABLE stores
-  ADD COLUMN latitude  DOUBLE PRECISION,
-  ADD COLUMN longitude DOUBLE PRECISION,
-  ADD COLUMN geocoded_at TIMESTAMPTZ;
-
-CREATE INDEX stores_latlng_idx ON stores (latitude, longitude);
+```sh
+D=$(mktemp -d)
+mysqld --no-defaults --initialize-insecure --datadir=$D/data --basedir=/usr --log-error=$D/init.log
+mysqld --no-defaults --datadir=$D/data --basedir=/usr --port=13306 \
+       --socket=$D/s.sock --mysqlx=0 --log-error=$D/server.log &
+mysql --no-defaults -h 127.0.0.1 -P 13306 -u root -e "CREATE DATABASE crmtest"
+mysql --no-defaults -h 127.0.0.1 -P 13306 -u root crmtest < server/migrations/000_stores_table_for_testing.sql
+mysql --no-defaults -h 127.0.0.1 -P 13306 -u root crmtest < server/migrations/001_add_store_location.sql
+npm install && node server/test_api.js
 ```
 
-(MySQL is the same with `DOUBLE` and `DATETIME` — tell me which one you're on and I'll
-ship the exact migration.)
+Migration 001 is the one that runs on your VPS; 000 only stands in for the `stores` table
+you already have, so the migration can be proven against a real MySQL 8 before it touches
+your database.
+
+## How this maps onto your stack
+
+Your CRM: React + TypeScript front end, Node + Express back end, MySQL, VPS on Hostinger.
+
+### 1. Store location fields — `server/migrations/001_add_store_location.sql`
+
+Written for MySQL 8 and **verified against a real MySQL 8.0.45 server**, not just written
+out. `DOUBLE`, not `FLOAT`: float carries ~7 significant digits, which rounds a coordinate
+to 1–2 metres and visibly shifts markers.
 
 The `geocoded_at` column matters: it lets us geocode an address **once** and reuse the
 result forever. Geocoding on every page load would put your Google bill on a meter for no
 reason.
 
-### 2. API endpoints (Express)
+### 2. API endpoints (Express) — `server/stores.routes.js`
 
 | Method | Route | Purpose |
 |---|---|---|
@@ -67,6 +79,22 @@ reason.
 | `PATCH`| `/api/stores/:id/location` | save corrected coordinates |
 | `POST` | `/api/stores/:id/geocode` | address → lat/lng, cached in `geocoded_at` |
 | `POST` | `/api/stores/in-polygon` | body: polygon vertices → the stores inside |
+
+The router takes a `db` with `query(sql, params)` — exactly what `mysql2/promise` gives you:
+
+```js
+const pool = mysql.createPool({ /* your CRM credentials */ });
+const db   = { query: async (sql, p) => (await pool.query(sql, p))[0] };
+const geocode = require('./server/geocoder')({ apiKey: process.env.GOOGLE_MAPS_KEY, region: 'es' });
+
+app.use('/api/stores', require('./server/stores.routes')({ db, geocode }));
+```
+
+`in-polygon` narrows with a bounding box in SQL first (an index range scan on
+`stores_latlng_idx` — asserted in the tests via `EXPLAIN`), then runs the exact
+ray-casting test on that much smaller set. A bounding box alone is not enough: for a
+concave polygon it over-selects, which the test suite proves with a C-shaped polygon
+whose notch contains a store.
 
 ### 3. Why the selection engine is a plain function
 
