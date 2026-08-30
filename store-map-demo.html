@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CRM Store Map - polygon selection demo</title>
+<style>
+  :root{
+    --bg:#0f1216; --panel:#171c22; --panel-2:#1e242c; --line:#2b333d;
+    --txt:#e6ebf1; --muted:#93a0ad; --accent:#4f9dff; --ok:#3ddc97;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--txt);
+       font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .app{display:grid;grid-template-columns:270px 1fr 300px;grid-template-rows:auto 1fr;height:100vh}
+  header{grid-column:1/-1;display:flex;align-items:center;gap:14px;padding:10px 16px;
+         background:var(--panel);border-bottom:1px solid var(--line)}
+  header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px}
+  header .tag{font-size:11px;color:var(--muted);border:1px solid var(--line);
+              padding:2px 8px;border-radius:99px}
+  header .spacer{flex:1}
+  input,select,button{font:inherit;color:var(--txt);background:var(--panel-2);
+                      border:1px solid var(--line);border-radius:6px;padding:6px 9px}
+  input::placeholder{color:#5f6b78}
+  button{cursor:pointer}
+  button:hover{border-color:#3f4a57}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#06172e;font-weight:600}
+  button.primary:hover{filter:brightness(1.08)}
+  button.ghost{background:transparent}
+  aside{background:var(--panel);overflow-y:auto;padding:14px}
+  aside.left{border-right:1px solid var(--line)}
+  aside.right{border-left:1px solid var(--line)}
+  h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);
+     margin:0 0 9px;font-weight:600}
+  .section{margin-bottom:22px}
+  .legend{display:flex;flex-direction:column;gap:6px}
+  .legend label{display:flex;align-items:center;gap:8px;cursor:pointer;padding:3px 0}
+  .dot{width:11px;height:11px;border-radius:50%;border:2px solid #0f1216;flex:none;
+       box-shadow:0 0 0 1px rgba(255,255,255,.25)}
+  .count{margin-left:auto;color:var(--muted);font-variant-numeric:tabular-nums;font-size:12px}
+  .field{display:flex;flex-direction:column;gap:5px;margin-bottom:9px}
+  .field span{font-size:11px;color:var(--muted)}
+  .row{display:flex;gap:8px}
+  .row>*{flex:1;min-width:0}
+  .hint{font-size:12px;color:var(--muted);margin:8px 0 0}
+  #mapwrap{position:relative;background:#11161c}
+  #gmap{position:absolute;inset:0}
+  #offline{position:absolute;inset:0}
+  #offline svg{width:100%;height:100%;display:block;cursor:crosshair}
+  .toolbar{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:5;
+           display:flex;gap:8px;background:rgba(23,28,34,.94);border:1px solid var(--line);
+           padding:7px;border-radius:9px;backdrop-filter:blur(6px)}
+  .banner{position:absolute;bottom:12px;left:12px;z-index:5;font-size:11px;color:var(--muted);
+          background:rgba(23,28,34,.94);border:1px solid var(--line);padding:5px 9px;border-radius:6px}
+  .store{display:flex;gap:9px;align-items:flex-start;padding:8px;border-radius:7px;
+         border:1px solid transparent}
+  .store:hover{background:var(--panel-2)}
+  .store .dot{margin-top:5px}
+  .store b{display:block;font-weight:600;font-size:13px}
+  .store small{color:var(--muted);font-size:11.5px}
+  .empty{color:var(--muted);font-size:12.5px;border:1px dashed var(--line);
+         border-radius:8px;padding:16px;text-align:center}
+  .pill{display:inline-flex;align-items:center;gap:6px;background:var(--panel-2);
+        border:1px solid var(--line);border-radius:99px;padding:3px 10px;font-size:12px}
+  .pill b{color:var(--ok);font-variant-numeric:tabular-nums}
+  .log{font-size:11.5px;color:var(--muted);margin-top:8px;max-height:120px;overflow:auto}
+  .log div{padding:2px 0;border-bottom:1px solid #232a32}
+  .del{background:transparent;border:none;color:#6e7c8a;padding:2px 6px;cursor:pointer;font-size:15px;line-height:1}
+  .del:hover{color:#ff6b6b}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>CRM Store Map</h1>
+    <span class="tag" id="modeTag">offline preview</span>
+    <div class="spacer"></div>
+    <input id="apiKey" placeholder="Paste your Google Maps API key to load the real map" style="width:340px">
+    <button class="primary" id="loadGoogle">Load Google Maps</button>
+  </header>
+
+  <aside class="left">
+    <div class="section">
+      <h2>Store categories</h2>
+      <div class="legend" id="legend"></div>
+    </div>
+
+    <div class="section">
+      <h2>CRM simulator &mdash; add a store</h2>
+      <div class="field"><span>Store name</span><input id="nName" placeholder="Tienda Chamberí"></div>
+      <div class="field"><span>Category</span><select id="nCat"></select></div>
+      <div class="row">
+        <div class="field"><span>Latitude</span><input id="nLat" placeholder="40.4300"></div>
+        <div class="field"><span>Longitude</span><input id="nLng" placeholder="-3.7050"></div>
+      </div>
+      <button class="primary" id="addStore" style="width:100%">Add store &rarr; map</button>
+      <p class="hint">Leave lat/long empty and it drops the store in the centre of the current view &mdash;
+         this stands in for the geocoding step (address &rarr; coordinates) in the real CRM.</p>
+    </div>
+
+    <div class="section">
+      <h2>Sync log</h2>
+      <div class="log" id="log"></div>
+    </div>
+  </aside>
+
+  <div id="mapwrap">
+    <div class="toolbar">
+      <button class="primary" id="drawBtn">Draw polygon</button>
+      <button class="ghost" id="clearBtn">Clear selection</button>
+    </div>
+    <div id="offline"></div>
+    <div id="gmap" style="display:none"></div>
+    <div class="banner" id="banner">
+      Offline preview &mdash; schematic tiles. Paste a Google Maps key above for the real basemap.
+      Selection logic is identical in both modes.
+    </div>
+  </div>
+
+  <aside class="right">
+    <div class="section">
+      <h2>Stores inside polygon</h2>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span class="pill"><b id="selCount">0</b> selected</span>
+        <span class="pill" style="color:var(--muted)"><span id="totCount">0</span> total</span>
+        <button class="ghost" id="csvBtn" style="margin-left:auto;font-size:12px">Export CSV</button>
+      </div>
+      <div id="selList"></div>
+    </div>
+  </aside>
+</div>
+
+<script>
+/* ------------------------------------------------------------------ *
+ * 1. Selection engine  (pure, no map dependency)
+ *    Deliberately NOT using google.maps.geometry so the exact same
+ *    function can run in the Node/Express backend against the DB.
+ * ------------------------------------------------------------------ */
+
+/** Ray-casting point-in-polygon. polygon = [{lat,lng}, ...] (unclosed ok). */
+function pointInPolygon(pt, polygon) {
+  if (!polygon || polygon.length < 3) return false;
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].lng, yi = polygon[i].lat;
+    const xj = polygon[j].lng, yj = polygon[j].lat;
+    const straddles = (yi > pt.lat) !== (yj > pt.lat);
+    if (straddles && pt.lng < ((xj - xi) * (pt.lat - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function storesInPolygon(stores, polygon) {
+  return stores.filter(s => pointInPolygon(s, polygon));
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { pointInPolygon, storesInPolygon };
+}
+
+/* ------------------------------------------------------------------ *
+ * 2. Demo data
+ * ------------------------------------------------------------------ */
+const CATEGORIES = [
+  { id:'flagship',  label:'Flagship',    color:'#4f9dff' },
+  { id:'franchise', label:'Franchise',   color:'#3ddc97' },
+  { id:'popup',     label:'Pop-up',      color:'#ffb454' },
+  { id:'partner',   label:'Partner',     color:'#c678dd' },
+];
+const catById = Object.fromEntries(CATEGORIES.map(c => [c.id, c]));
+
+let nextId = 1;
+const mk = (name, cat, lat, lng) => ({ id: nextId++, name, cat, lat, lng });
+
+let stores = [
+  mk('Gran Vía 34',        'flagship',  40.4203, -3.7058),
+  mk('Callao',             'flagship',  40.4197, -3.7060),
+  mk('Sol',                'franchise', 40.4169, -3.7035),
+  mk('Ópera',              'franchise', 40.4180, -3.7100),
+  mk('Chueca',             'popup',     40.4235, -3.6975),
+  mk('Malasaña',           'franchise', 40.4260, -3.7035),
+  mk('Bilbao',             'partner',   40.4290, -3.7010),
+  mk('Alonso Martínez',    'flagship',  40.4275, -3.6950),
+  mk('Serrano 41',         'flagship',  40.4258, -3.6875),
+  mk('Goya',               'franchise', 40.4245, -3.6780),
+  mk('Retiro',             'partner',   40.4185, -3.6830),
+  mk('Atocha',             'franchise', 40.4075, -3.6905),
+  mk('Lavapiés',           'popup',     40.4090, -3.7010),
+  mk('La Latina',          'franchise', 40.4115, -3.7095),
+  mk('Plaza España',       'partner',   40.4235, -3.7125),
+  mk('Argüelles',          'franchise', 40.4300, -3.7160),
+  mk('Moncloa',            'partner',   40.4350, -3.7190),
+  mk('Chamberí',           'franchise', 40.4340, -3.7040),
+  mk('Nuevos Ministerios', 'flagship',  40.4460, -3.6925),
+  mk('Cuatro Caminos',     'popup',     40.4465, -3.7040),
+  mk('Salamanca Norte',    'partner',   40.4345, -3.6805),
+  mk('Prosperidad',        'franchise', 40.4430, -3.6740),
+  mk('Delicias',           'popup',     40.3985, -3.6935),
+  mk('Legazpi',            'franchise', 40.3910, -3.6950),
+];
+
+let polygon = [];      // [{lat,lng}]
+let selectedIds = new Set();
+let drawing = false;
+let hidden = new Set(); // category ids toggled off
+
+/* ------------------------------------------------------------------ *
+ * 3. Shared state -> UI
+ * ------------------------------------------------------------------ */
+const $ = id => document.getElementById(id);
+
+function visibleStores() { return stores.filter(s => !hidden.has(s.cat)); }
+
+function recompute() {
+  selectedIds = new Set(storesInPolygon(visibleStores(), polygon).map(s => s.id));
+  renderSelection();
+  renderLegend();
+  surface.render();
+}
+
+function renderLegend() {
+  const counts = {};
+  stores.forEach(s => counts[s.cat] = (counts[s.cat] || 0) + 1);
+  $('legend').innerHTML = CATEGORIES.map(c => `
+    <label>
+      <input type="checkbox" data-cat="${c.id}" ${hidden.has(c.id) ? '' : 'checked'}>
+      <span class="dot" style="background:${c.color}"></span>
+      <span>${c.label}</span>
+      <span class="count">${counts[c.id] || 0}</span>
+    </label>`).join('');
+  $('legend').querySelectorAll('input').forEach(cb => {
+    cb.onchange = () => {
+      const c = cb.dataset.cat;
+      cb.checked ? hidden.delete(c) : hidden.add(c);
+      recompute();
+    };
+  });
+}
+
+function renderSelection() {
+  const sel = stores.filter(s => selectedIds.has(s.id));
+  $('selCount').textContent = sel.length;
+  $('totCount').textContent = visibleStores().length;
+  $('selList').innerHTML = sel.length
+    ? sel.map(s => `
+        <div class="store">
+          <span class="dot" style="background:${catById[s.cat].color}"></span>
+          <span style="flex:1;min-width:0">
+            <b>${s.name}</b>
+            <small>${catById[s.cat].label} &middot; ${s.lat.toFixed(4)}, ${s.lng.toFixed(4)}</small>
+          </span>
+          <button class="del" data-del="${s.id}" title="Delete from CRM">&times;</button>
+        </div>`).join('')
+    : `<div class="empty">Draw a polygon on the map to select the stores inside it.</div>`;
+  $('selList').querySelectorAll('[data-del]').forEach(b => {
+    b.onclick = () => removeStore(Number(b.dataset.del));
+  });
+}
+
+function log(msg) {
+  const d = document.createElement('div');
+  d.textContent = msg;
+  $('log').prepend(d);
+}
+
+/* ---- CRM operations: these are the three sync cases in the scope ---- */
+function addStore(s) {
+  stores.push(s);
+  log(`+ added "${s.name}" (${s.lat.toFixed(4)}, ${s.lng.toFixed(4)})`);
+  recompute();
+}
+function removeStore(id) {
+  const s = stores.find(x => x.id === id);
+  if (!s) return;
+  stores = stores.filter(x => x.id !== id);
+  log(`- removed "${s.name}"`);
+  recompute();
+}
+function moveStore(id, lat, lng) {
+  const s = stores.find(x => x.id === id);
+  if (!s) return;
+  s.lat = lat; s.lng = lng;
+  log(`~ moved "${s.name}" to ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+  recompute();
+}
+
+/* ------------------------------------------------------------------ *
+ * 4. Map surfaces. Both call recompute(); only rendering differs.
+ * ------------------------------------------------------------------ */
+
+/* --- 4a. Offline schematic surface (no API key needed) --- */
+const OfflineSurface = (() => {
+  const host = $('offline');
+  const B = { minLat: 40.385, maxLat: 40.452, minLng: -3.725, maxLng: -3.668 };
+  let W = 800, H = 600;
+
+  const x = lng => (lng - B.minLng) / (B.maxLng - B.minLng) * W;
+  const y = lat => (B.maxLat - lat) / (B.maxLat - B.minLat) * H;
+  const toLng = px => B.minLng + (px / W) * (B.maxLng - B.minLng);
+  const toLat = py => B.maxLat - (py / H) * (B.maxLat - B.minLat);
+
+  function measure() {
+    const r = host.getBoundingClientRect();
+    if (r.width && r.height) { W = r.width; H = r.height; }
+  }
+
+  function render() {
+    measure();
+    const grid = [];
+    for (let gx = 0; gx <= W; gx += 60) grid.push(`<line x1="${gx}" y1="0" x2="${gx}" y2="${H}"/>`);
+    for (let gy = 0; gy <= H; gy += 60) grid.push(`<line x1="0" y1="${gy}" x2="${W}" y2="${gy}"/>`);
+
+    const poly = polygon.length
+      ? `<polygon points="${polygon.map(p => `${x(p.lng)},${y(p.lat)}`).join(' ')}"
+                  fill="rgba(79,157,255,.14)" stroke="#4f9dff" stroke-width="2"
+                  stroke-dasharray="${drawing ? '6 5' : '0'}"/>` +
+        polygon.map(p => `<circle cx="${x(p.lng)}" cy="${y(p.lat)}" r="4" fill="#4f9dff"
+                                  stroke="#0f1216" stroke-width="1.5"/>`).join('')
+      : '';
+
+    const marks = visibleStores().map(s => {
+      const on = selectedIds.has(s.id);
+      return `<g>
+        <circle cx="${x(s.lng)}" cy="${y(s.lat)}" r="${on ? 9 : 6}"
+                fill="${catById[s.cat].color}" stroke="${on ? '#fff' : '#0f1216'}"
+                stroke-width="${on ? 2.5 : 1.5}" opacity="${on ? 1 : .82}"/>
+        ${on ? `<text x="${x(s.lng) + 13}" y="${y(s.lat) + 4}" fill="#e6ebf1"
+                      font-size="11">${s.name}</text>` : ''}
+      </g>`;
+    }).join('');
+
+    host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+      <rect width="${W}" height="${H}" fill="#141a21"/>
+      <g stroke="#1f262e" stroke-width="1">${grid.join('')}</g>
+      ${poly}${marks}
+    </svg>`;
+
+    host.querySelector('svg').onclick = e => {
+      if (!drawing) return;
+      const r = host.getBoundingClientRect();
+      polygon.push({ lat: toLat(e.clientY - r.top), lng: toLng(e.clientX - r.left) });
+      recompute();
+    };
+  }
+
+  return {
+    render,
+    show()   { host.style.display = 'block'; $('gmap').style.display = 'none'; },
+    startDraw() { polygon = []; drawing = true; recompute(); },
+    endDraw()   { drawing = false; recompute(); },
+    clear()     { polygon = []; drawing = false; recompute(); },
+    center()    { return { lat: (B.minLat + B.maxLat) / 2, lng: (B.minLng + B.maxLng) / 2 }; },
+  };
+})();
+
+/* --- 4b. Google Maps surface (needs the client's API key) --- */
+const GoogleSurface = (() => {
+  let map, markers = new Map(), gPoly = null, drawMgr = null;
+
+  function init() {
+    map = new google.maps.Map($('gmap'), {
+      center: { lat: 40.4200, lng: -3.7020 }, zoom: 13, mapTypeControl: false,
+      streetViewControl: false, fullscreenControl: false,
+    });
+    drawMgr = new google.maps.drawing.DrawingManager({
+      drawingControl: false,
+      polygonOptions: { fillColor:'#4f9dff', fillOpacity:.14, strokeColor:'#4f9dff', strokeWeight:2 },
+    });
+    drawMgr.setMap(map);
+    google.maps.event.addListener(drawMgr, 'polygoncomplete', p => {
+      if (gPoly) gPoly.setMap(null);
+      gPoly = p;
+      drawMgr.setDrawingMode(null);
+      drawing = false;
+      const readPath = () => {
+        polygon = p.getPath().getArray().map(ll => ({ lat: ll.lat(), lng: ll.lng() }));
+        recompute();
+      };
+      ['set_at','insert_at','remove_at'].forEach(ev =>
+        google.maps.event.addListener(p.getPath(), ev, readPath));
+      readPath();
+    });
+    render();
+  }
+
+  function render() {
+    if (!map) return;
+    const want = new Set(visibleStores().map(s => s.id));
+    // remove markers whose store was deleted or hidden
+    markers.forEach((m, id) => { if (!want.has(id)) { m.setMap(null); markers.delete(id); } });
+    // add / update the rest
+    visibleStores().forEach(s => {
+      const on = selectedIds.has(s.id);
+      const icon = {
+        path: google.maps.SymbolPath.CIRCLE,
+        fillColor: catById[s.cat].color, fillOpacity: 1,
+        strokeColor: on ? '#ffffff' : '#0f1216', strokeWeight: on ? 3 : 1.5,
+        scale: on ? 9 : 6,
+      };
+      let m = markers.get(s.id);
+      if (!m) {
+        m = new google.maps.Marker({ map, position:{lat:s.lat,lng:s.lng}, title:s.name, icon });
+        markers.set(s.id, m);
+      } else {
+        m.setPosition({ lat: s.lat, lng: s.lng });   // handles the lat/long-updated case
+        m.setIcon(icon);
+      }
+    });
+  }
+
+  return {
+    init, render,
+    show()   { $('gmap').style.display = 'block'; $('offline').style.display = 'none'; },
+    startDraw() {
+      if (gPoly) { gPoly.setMap(null); gPoly = null; }
+      polygon = []; drawing = true; recompute();
+      drawMgr.setDrawingMode(google.maps.drawing.OverlayType.POLYGON);
+    },
+    endDraw() { drawMgr.setDrawingMode(null); drawing = false; recompute(); },
+    clear()   {
+      if (gPoly) { gPoly.setMap(null); gPoly = null; }
+      drawMgr.setDrawingMode(null); polygon = []; drawing = false; recompute();
+    },
+    center()  { const c = map.getCenter(); return { lat: c.lat(), lng: c.lng() }; },
+  };
+})();
+
+let surface = OfflineSurface;
+
+/* ------------------------------------------------------------------ *
+ * 5. Wiring
+ * ------------------------------------------------------------------ */
+$('drawBtn').onclick = () => {
+  if (drawing) { surface.endDraw(); $('drawBtn').textContent = 'Draw polygon'; }
+  else {
+    surface.startDraw();
+    $('drawBtn').textContent = surface === OfflineSurface ? 'Finish polygon' : 'Drawing…';
+  }
+};
+$('clearBtn').onclick = () => { surface.clear(); $('drawBtn').textContent = 'Draw polygon'; };
+
+$('nCat').innerHTML = CATEGORIES.map(c => `<option value="${c.id}">${c.label}</option>`).join('');
+$('addStore').onclick = () => {
+  const name = $('nName').value.trim() || `New store ${stores.length + 1}`;
+  const c = surface.center();
+  const lat = parseFloat($('nLat').value) || c.lat + (Math.random() - .5) * .01;
+  const lng = parseFloat($('nLng').value) || c.lng + (Math.random() - .5) * .01;
+  addStore(mk(name, $('nCat').value, lat, lng));
+  $('nName').value = $('nLat').value = $('nLng').value = '';
+};
+
+$('csvBtn').onclick = () => {
+  const sel = stores.filter(s => selectedIds.has(s.id));
+  if (!sel.length) return;
+  const csv = 'id,name,category,latitude,longitude\n' +
+    sel.map(s => `${s.id},"${s.name}",${s.cat},${s.lat},${s.lng}`).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type:'text/csv' }));
+  a.download = 'selected-stores.csv';
+  a.click();
+};
+
+$('loadGoogle').onclick = () => {
+  const key = $('apiKey').value.trim();
+  if (!key) { alert('Paste your Google Maps JavaScript API key first.'); return; }
+  const s = document.createElement('script');
+  s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&libraries=drawing&callback=__gmapReady`;
+  s.onerror = () => alert('Could not load Google Maps - check the key and its HTTP referrer restrictions.');
+  document.head.appendChild(s);
+};
+window.__gmapReady = () => {
+  surface = GoogleSurface;
+  surface.show();
+  GoogleSurface.init();
+  $('modeTag').textContent = 'Google Maps';
+  $('banner').textContent = 'Live Google Maps basemap. Draw polygon → click points on the map, click the first point again to close.';
+  polygon = []; drawing = false;
+  recompute();
+  log('Google Maps loaded');
+};
+
+window.addEventListener('resize', () => surface.render());
+OfflineSurface.show();
+recompute();
+log('Loaded 24 demo stores');
+</script>
+</body>
+</html>
