@@ -68,6 +68,10 @@
   .log div{padding:2px 0;border-bottom:1px solid #232a32}
   .del{background:transparent;border:none;color:#6e7c8a;padding:2px 6px;cursor:pointer;font-size:15px;line-height:1}
   .del:hover{color:#ff6b6b}
+  .perfbar{position:absolute;top:14px;right:14px;z-index:5;pointer-events:none;
+           font-size:11px;color:var(--muted);background:rgba(15,18,22,.72);
+           border:1px solid var(--line);border-radius:99px;padding:4px 11px;
+           font-variant-numeric:tabular-nums}
 </style>
 </head>
 <body>
@@ -100,6 +104,16 @@
     </div>
 
     <div class="section">
+      <h2>Scale</h2>
+      <button class="ghost" id="bulkBtn" style="width:100%">Load 2,000 stores</button>
+      <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;margin-top:10px">
+        <input type="checkbox" id="clusterBox" checked> Cluster nearby pins
+      </label>
+      <p class="hint">2,000 is the real size of your database. Clustering merges nearby
+         pins into a numbered bubble &mdash; click one on Google Maps to zoom into it.</p>
+    </div>
+
+    <div class="section">
       <h2>Sync log</h2>
       <div class="log" id="log"></div>
     </div>
@@ -110,6 +124,8 @@
       <button class="primary" id="drawBtn">Draw polygon</button>
       <button class="ghost" id="clearBtn">Clear selection</button>
     </div>
+    <!-- pointer-events:none, or this floating strip eats clicks meant for the map -->
+    <div class="perfbar" id="perf"></div>
     <div id="offline"></div>
     <div id="gmap" style="display:none"></div>
     <div class="banner" id="banner">
@@ -126,6 +142,7 @@
         <span class="pill" style="color:var(--muted)"><span id="totCount">0</span> total</span>
         <button class="ghost" id="csvBtn" style="margin-left:auto;font-size:12px">Export CSV</button>
       </div>
+      <div id="listNote" style="font-size:11px;color:var(--muted);margin-bottom:8px"></div>
       <div id="selList"></div>
     </div>
   </aside>
@@ -155,18 +172,51 @@ function storesInPolygon(stores, polygon) {
   return stores.filter(s => pointInPolygon(s, polygon));
 }
 
+/** Grid clustering, also pure and also map-agnostic.
+ *
+ *  At 2,000 stores, dropping 2,000 individual pins on the map is both slow and
+ *  unreadable - central Madrid becomes one solid blob of colour. So nearby pins
+ *  are merged into a numbered bubble, which splits apart again as you zoom in.
+ *
+ *  points: [{id, x, y, ...}] in SCREEN pixels. The caller converts; this stays
+ *  pure so the same function serves the offline preview and Google Maps, and so
+ *  it can be unit tested without a browser.
+ *
+ *  Invariant the tests pin down: every point comes out in exactly one cluster.
+ *  Never dropped, never counted twice - a clustering bug that loses pins would
+ *  otherwise look exactly like "that store isn't in the database".
+ */
+function clusterPoints(points, cellSize) {
+  if (!(cellSize > 0)) return points.map(p => ({ x: p.x, y: p.y, count: 1, items: [p] }));
+  const cells = new Map();
+  for (const p of points) {
+    const key = Math.floor(p.x / cellSize) + ':' + Math.floor(p.y / cellSize);
+    let c = cells.get(key);
+    if (!c) { c = { sx: 0, sy: 0, items: [] }; cells.set(key, c); }
+    c.sx += p.x; c.sy += p.y; c.items.push(p);
+  }
+  return Array.from(cells.values()).map(c => ({
+    x: c.sx / c.items.length,
+    y: c.sy / c.items.length,
+    count: c.items.length,
+    items: c.items,
+  }));
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { pointInPolygon, storesInPolygon };
+  module.exports = { pointInPolygon, storesInPolygon, clusterPoints };
 }
 
 /* ------------------------------------------------------------------ *
  * 2. Demo data
  * ------------------------------------------------------------------ */
+/* Your three real categories. Colours chosen to stay distinguishable for the
+   most common form of colour blindness (red/green), which is why there is no
+   red-vs-green pair here. */
 const CATEGORIES = [
-  { id:'flagship',  label:'Flagship',    color:'#4f9dff' },
-  { id:'franchise', label:'Franchise',   color:'#3ddc97' },
-  { id:'popup',     label:'Pop-up',      color:'#ffb454' },
-  { id:'partner',   label:'Partner',     color:'#c678dd' },
+  { id:'active',    label:'Active',    color:'#3ddc97' },
+  { id:'potential', label:'Potential', color:'#ffb454' },
+  { id:'chain',     label:'Chain',     color:'#4f9dff' },
 ];
 const catById = Object.fromEntries(CATEGORIES.map(c => [c.id, c]));
 
@@ -174,36 +224,82 @@ let nextId = 1;
 const mk = (name, cat, lat, lng) => ({ id: nextId++, name, cat, lat, lng });
 
 let stores = [
-  mk('Gran Vía 34',        'flagship',  40.4203, -3.7058),
-  mk('Callao',             'flagship',  40.4197, -3.7060),
-  mk('Sol',                'franchise', 40.4169, -3.7035),
-  mk('Ópera',              'franchise', 40.4180, -3.7100),
-  mk('Chueca',             'popup',     40.4235, -3.6975),
-  mk('Malasaña',           'franchise', 40.4260, -3.7035),
-  mk('Bilbao',             'partner',   40.4290, -3.7010),
-  mk('Alonso Martínez',    'flagship',  40.4275, -3.6950),
-  mk('Serrano 41',         'flagship',  40.4258, -3.6875),
-  mk('Goya',               'franchise', 40.4245, -3.6780),
-  mk('Retiro',             'partner',   40.4185, -3.6830),
-  mk('Atocha',             'franchise', 40.4075, -3.6905),
-  mk('Lavapiés',           'popup',     40.4090, -3.7010),
-  mk('La Latina',          'franchise', 40.4115, -3.7095),
-  mk('Plaza España',       'partner',   40.4235, -3.7125),
-  mk('Argüelles',          'franchise', 40.4300, -3.7160),
-  mk('Moncloa',            'partner',   40.4350, -3.7190),
-  mk('Chamberí',           'franchise', 40.4340, -3.7040),
-  mk('Nuevos Ministerios', 'flagship',  40.4460, -3.6925),
-  mk('Cuatro Caminos',     'popup',     40.4465, -3.7040),
-  mk('Salamanca Norte',    'partner',   40.4345, -3.6805),
-  mk('Prosperidad',        'franchise', 40.4430, -3.6740),
-  mk('Delicias',           'popup',     40.3985, -3.6935),
-  mk('Legazpi',            'franchise', 40.3910, -3.6950),
+  mk('Gran Vía 34',        'chain',     40.4203, -3.7058),
+  mk('Callao',             'chain',     40.4197, -3.7060),
+  mk('Sol',                'active',    40.4169, -3.7035),
+  mk('Ópera',              'active',    40.4180, -3.7100),
+  mk('Chueca',             'potential', 40.4235, -3.6975),
+  mk('Malasaña',           'active',    40.4260, -3.7035),
+  mk('Bilbao',             'potential', 40.4290, -3.7010),
+  mk('Alonso Martínez',    'chain',     40.4275, -3.6950),
+  mk('Serrano 41',         'chain',     40.4258, -3.6875),
+  mk('Goya',               'active',    40.4245, -3.6780),
+  mk('Retiro',             'potential', 40.4185, -3.6830),
+  mk('Atocha',             'active',    40.4075, -3.6905),
+  mk('Lavapiés',           'potential', 40.4090, -3.7010),
+  mk('La Latina',          'active',    40.4115, -3.7095),
+  mk('Plaza España',       'potential', 40.4235, -3.7125),
+  mk('Argüelles',          'active',    40.4300, -3.7160),
+  mk('Moncloa',            'potential', 40.4350, -3.7190),
+  mk('Chamberí',           'active',    40.4340, -3.7040),
+  mk('Nuevos Ministerios', 'chain',     40.4460, -3.6925),
+  mk('Cuatro Caminos',     'potential', 40.4465, -3.7040),
+  mk('Salamanca Norte',    'potential', 40.4345, -3.6805),
+  mk('Prosperidad',        'active',    40.4430, -3.6740),
+  mk('Delicias',           'potential', 40.3985, -3.6935),
+  mk('Legazpi',            'active',    40.3910, -3.6950),
 ];
+
+/* Stress data: 2,000 stores, the real size of your database. Not a decoration -
+   it is how I check that drawing a polygon over the whole city still answers
+   instantly instead of freezing the browser. Clustered around a few centres so
+   the density looks like a real city rather than confetti. */
+const DISTRICTS = [
+  { lat: 40.4180, lng: -3.7030, r: .020, w: 26 },   // centre
+  { lat: 40.4450, lng: -3.6900, r: .022, w: 16 },   // north
+  { lat: 40.4000, lng: -3.6950, r: .022, w: 15 },   // south
+  { lat: 40.4300, lng: -3.7250, r: .024, w: 14 },   // west
+  { lat: 40.4250, lng: -3.6650, r: .024, w: 14 },   // east
+  { lat: 40.4600, lng: -3.7400, r: .045, w: 8 },    // outskirts NW
+  { lat: 40.3750, lng: -3.7300, r: .045, w: 7 },    // outskirts SW
+];
+/* Deterministic pseudo-random in [0,1). Deliberately not Math.random() so the
+   stress set is identical on every run - otherwise a performance number could
+   not be compared against the previous one. */
+function hash01(n) {
+  const x = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+  return x - Math.floor(x);
+}
+
+function makeBulkStores(n) {
+  const total = DISTRICTS.reduce((a, d) => a + d.w, 0);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    let r = hash01(i) * total;
+    let d = DISTRICTS[0];
+    for (const cand of DISTRICTS) { if (r < cand.w) { d = cand; break; } r -= cand.w; }
+    // Angle and radius must come from INDEPENDENT hashes. Deriving the radius
+    // from the same counter as the angle draws a visible spiral, which looks
+    // like decoration rather than like a city.
+    const a   = hash01(i + 0.37) * Math.PI * 2;
+    const rad = d.r * Math.sqrt(hash01(i + 0.91));      // sqrt = even area density
+    // Category follows POSITION, not the loop counter: real categories cluster
+    // geographically (chains downtown, prospects on the edges). Round-robin would
+    // make every cluster mixed, and every bubble on the map the same grey.
+    const sector = Math.floor(a / ((Math.PI * 2) / 3));
+    const cat = CATEGORIES[(sector + DISTRICTS.indexOf(d)) % CATEGORIES.length].id;
+    out.push(mk(`Store ${i + 1}`, cat,
+                d.lat + rad * Math.sin(a), d.lng + rad * Math.cos(a)));
+  }
+  return out;
+}
 
 let polygon = [];      // [{lat,lng}]
 let selectedIds = new Set();
 let drawing = false;
 let hidden = new Set(); // category ids toggled off
+let clustering = true;  // merge nearby pins into a numbered bubble
+const CELL_PX = 48;     // cluster grid size in screen pixels
 
 /* ------------------------------------------------------------------ *
  * 3. Shared state -> UI
@@ -213,10 +309,25 @@ const $ = id => document.getElementById(id);
 function visibleStores() { return stores.filter(s => !hidden.has(s.cat)); }
 
 function recompute() {
+  const t0 = performance.now();
   selectedIds = new Set(storesInPolygon(visibleStores(), polygon).map(s => s.id));
+  const t1 = performance.now();
   renderSelection();
   renderLegend();
   surface.render();
+  const t2 = performance.now();
+  // Exposed so the automated tests can read real timings out of a real browser
+  // instead of me estimating them. See test_ui.py.
+  window.__perf = {
+    selectMs: +(t1 - t0).toFixed(2),
+    renderMs: +(t2 - t1).toFixed(2),
+    stores: stores.length,
+    visible: visibleStores().length,
+    selected: selectedIds.size,
+  };
+  const p = $('perf');
+  if (p) p.textContent =
+    `${window.__perf.visible} pins · select ${window.__perf.selectMs} ms · draw ${window.__perf.renderMs} ms`;
 }
 
 function renderLegend() {
@@ -238,10 +349,19 @@ function renderLegend() {
   });
 }
 
+/* Selecting half of 2,000 stores would mean 1,000 rows of DOM on every redraw,
+   which is slow for no benefit - nobody reads row 700. The list shows the first
+   LIST_CAP and says so; Export CSV always writes the full selection. */
+const LIST_CAP = 200;
+
 function renderSelection() {
-  const sel = stores.filter(s => selectedIds.has(s.id));
-  $('selCount').textContent = sel.length;
+  const all = stores.filter(s => selectedIds.has(s.id));
+  const sel = all.slice(0, LIST_CAP);
+  $('selCount').textContent = all.length;
   $('totCount').textContent = visibleStores().length;
+  $('listNote').textContent = all.length > LIST_CAP
+    ? `showing first ${LIST_CAP} of ${all.length} — Export CSV gives you all of them`
+    : '';
   $('selList').innerHTML = sel.length
     ? sel.map(s => `
         <div class="store">
@@ -292,7 +412,8 @@ function moveStore(id, lat, lng) {
 /* --- 4a. Offline schematic surface (no API key needed) --- */
 const OfflineSurface = (() => {
   const host = $('offline');
-  const B = { minLat: 40.385, maxLat: 40.452, minLng: -3.725, maxLng: -3.668 };
+  // Wide enough to hold the full 2,000-store stress set, not just the 24 named ones.
+  const B = { minLat: 40.360, maxLat: 40.478, minLng: -3.775, maxLng: -3.625 };
   let W = 800, H = 600;
 
   const x = lng => (lng - B.minLng) / (B.maxLng - B.minLng) * W;
@@ -319,14 +440,37 @@ const OfflineSurface = (() => {
                                   stroke="#0f1216" stroke-width="1.5"/>`).join('')
       : '';
 
-    const marks = visibleStores().map(s => {
-      const on = selectedIds.has(s.id);
+    const pts = visibleStores().map(s => ({ ...s, x: x(s.lng), y: y(s.lat) }));
+    const groups = clustering ? clusterPoints(pts, CELL_PX) : pts.map(p => ({ x:p.x, y:p.y, count:1, items:[p] }));
+    const showLabels = pts.length <= 60;
+
+    const marks = groups.map(g => {
+      if (g.count === 1) {
+        const s = g.items[0], on = selectedIds.has(s.id);
+        return `<g>
+          <circle cx="${g.x}" cy="${g.y}" r="${on ? 9 : 6}"
+                  fill="${catById[s.cat].color}" stroke="${on ? '#fff' : '#0f1216'}"
+                  stroke-width="${on ? 2.5 : 1.5}" opacity="${on ? 1 : .82}"/>
+          ${on && showLabels ? `<text x="${g.x + 13}" y="${g.y + 4}" fill="#e6ebf1"
+                        font-size="11">${s.name}</text>` : ''}
+        </g>`;
+      }
+      const cats = new Set(g.items.map(i => i.cat));
+      const fill = cats.size === 1 ? catById[g.items[0].cat].color : '#8b97a6';
+      const selIn = g.items.filter(i => selectedIds.has(i.id)).length;
+      // Capped so a bubble never spills outside its own CELL_PX cell and
+      // swallows its neighbours.
+      const r = Math.min(19, 10 + Math.log2(g.count) * 2.6);
       return `<g>
-        <circle cx="${x(s.lng)}" cy="${y(s.lat)}" r="${on ? 9 : 6}"
-                fill="${catById[s.cat].color}" stroke="${on ? '#fff' : '#0f1216'}"
-                stroke-width="${on ? 2.5 : 1.5}" opacity="${on ? 1 : .82}"/>
-        ${on ? `<text x="${x(s.lng) + 13}" y="${y(s.lat) + 4}" fill="#e6ebf1"
-                      font-size="11">${s.name}</text>` : ''}
+        <circle cx="${g.x}" cy="${g.y}" r="${r + 4}" fill="${fill}" opacity=".22"/>
+        <circle cx="${g.x}" cy="${g.y}" r="${r}" fill="${fill}"
+                stroke="${selIn ? '#fff' : '#0f1216'}" stroke-width="${selIn ? 2.5 : 1.5}"
+                opacity="${selIn ? 1 : .85}"/>
+        <text x="${g.x}" y="${g.y + 4}" text-anchor="middle" fill="#0f1216"
+              font-size="${r > 16 ? 12 : 10}" font-weight="700">${g.count}</text>
+        ${selIn && selIn < g.count
+          ? `<text x="${g.x}" y="${g.y + r + 12}" text-anchor="middle" fill="#e6ebf1"
+                   font-size="10">${selIn} selected</text>` : ''}
       </g>`;
     }).join('');
 
@@ -368,6 +512,8 @@ const GoogleSurface = (() => {
       polygonOptions: { fillColor:'#4f9dff', fillOpacity:.14, strokeColor:'#4f9dff', strokeWeight:2 },
     });
     drawMgr.setMap(map);
+    // Clustering depends on zoom, so re-cluster whenever the view settles.
+    google.maps.event.addListener(map, 'idle', render);
     google.maps.event.addListener(drawMgr, 'polygoncomplete', p => {
       if (gPoly) gPoly.setMap(null);
       gPoly = p;
@@ -384,27 +530,81 @@ const GoogleSurface = (() => {
     render();
   }
 
+  /* Screen-space cluster grid, expressed in degrees.
+     Google's own projection object is only valid after tilesloaded, and this
+     needs none of it: bounds span / div size gives degrees per pixel directly,
+     so the SAME clusterPoints() runs here as in the offline preview. */
+  function degPerPx() {
+    const b = map.getBounds();
+    const el = $('gmap');
+    if (!b || !el.clientWidth || !el.clientHeight) return null;
+    const ne = b.getNorthEast(), sw = b.getSouthWest();
+    let spanLng = ne.lng() - sw.lng();
+    if (spanLng < 0) spanLng += 360;                       // crossing the date line
+    return { lng: spanLng / el.clientWidth, lat: (ne.lat() - sw.lat()) / el.clientHeight };
+  }
+
   function render() {
     if (!map) return;
-    const want = new Set(visibleStores().map(s => s.id));
-    // remove markers whose store was deleted or hidden
-    markers.forEach((m, id) => { if (!want.has(id)) { m.setMap(null); markers.delete(id); } });
-    // add / update the rest
-    visibleStores().forEach(s => {
-      const on = selectedIds.has(s.id);
+    const vis = visibleStores();
+    const d = degPerPx();
+    let groups;
+    if (clustering && d) {
+      const pts = vis.map(s => ({ ...s, x: s.lng / d.lng, y: s.lat / d.lat }));
+      groups = clusterPoints(pts, CELL_PX);
+    } else {
+      groups = vis.map(s => ({ count: 1, items: [s] }));
+    }
+
+    // Key a group by identity, not by array position: a single store keeps its
+    // own id, a cluster is identified by its member ids. Add, remove or move a
+    // store and the key changes, so the marker is rebuilt - no stale pins.
+    const keyed = new Map();
+    for (const g of groups) {
+      const key = g.count === 1 ? 's' + g.items[0].id
+                                : 'c' + g.items.map(i => i.id).sort((a, b) => a - b).join('.');
+      keyed.set(key, g);
+    }
+    markers.forEach((m, k) => { if (!keyed.has(k)) { m.setMap(null); markers.delete(k); } });
+
+    keyed.forEach((g, key) => {
+      const single = g.count === 1;
+      const s = g.items[0];
+      const selIn = g.items.filter(i => selectedIds.has(i.id)).length;
+      const cats = new Set(g.items.map(i => i.cat));
+      const colour = cats.size === 1 ? catById[s.cat].color : '#8b97a6';
+      const pos = single
+        ? { lat: s.lat, lng: s.lng }
+        : { lat: g.items.reduce((a, i) => a + i.lat, 0) / g.count,
+            lng: g.items.reduce((a, i) => a + i.lng, 0) / g.count };
+
       const icon = {
         path: google.maps.SymbolPath.CIRCLE,
-        fillColor: catById[s.cat].color, fillOpacity: 1,
-        strokeColor: on ? '#ffffff' : '#0f1216', strokeWeight: on ? 3 : 1.5,
-        scale: on ? 9 : 6,
+        fillColor: colour, fillOpacity: 1,
+        strokeColor: selIn ? '#ffffff' : '#0f1216', strokeWeight: selIn ? 3 : 1.5,
+        scale: single ? (selIn ? 9 : 6) : Math.min(22, 10 + Math.log2(g.count) * 3),
       };
-      let m = markers.get(s.id);
+      const label = single ? null
+        : { text: String(g.count), color: '#0f1216', fontSize: '11px', fontWeight: '700' };
+      const title = single ? s.name
+        : `${g.count} stores${selIn ? ` · ${selIn} selected` : ''}`;
+
+      let m = markers.get(key);
       if (!m) {
-        m = new google.maps.Marker({ map, position:{lat:s.lat,lng:s.lng}, title:s.name, icon });
-        markers.set(s.id, m);
+        m = new google.maps.Marker({ map, position: pos, title, icon, label });
+        // Clicking a cluster zooms into it, which is how you get from 2,000
+        // pins down to the individual store without a scrolling list.
+        if (!single) m.addListener('click', () => {
+          const b = new google.maps.LatLngBounds();
+          g.items.forEach(i => b.extend({ lat: i.lat, lng: i.lng }));
+          map.fitBounds(b, 48);
+        });
+        markers.set(key, m);
       } else {
-        m.setPosition({ lat: s.lat, lng: s.lng });   // handles the lat/long-updated case
+        m.setPosition(pos);        // handles the lat/long-updated case
         m.setIcon(icon);
+        m.setLabel(label);
+        m.setTitle(title);
       }
     });
   }
@@ -439,6 +639,16 @@ $('drawBtn').onclick = () => {
   }
 };
 $('clearBtn').onclick = () => { surface.clear(); $('drawBtn').textContent = 'Draw polygon'; };
+
+$('clusterBox').onchange = e => { clustering = e.target.checked; recompute(); };
+
+$('bulkBtn').onclick = () => {
+  if (stores.length > 500) return;
+  const extra = makeBulkStores(2000 - stores.length);
+  stores = stores.concat(extra);
+  log(`+ loaded ${extra.length} stores (${stores.length} total)`);
+  recompute();
+};
 
 $('nCat').innerHTML = CATEGORIES.map(c => `<option value="${c.id}">${c.label}</option>`).join('');
 $('addStore').onclick = () => {

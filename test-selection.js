@@ -8,8 +8,8 @@ const start = html.indexOf('function pointInPolygon');
 const end = html.indexOf('if (typeof module');
 if (start < 0 || end < 0) throw new Error('could not extract engine from html');
 const src = html.slice(start, end);
-const { pointInPolygon, storesInPolygon } =
-  new Function(src + '\nreturn { pointInPolygon, storesInPolygon };')();
+const { pointInPolygon, storesInPolygon, clusterPoints } =
+  new Function(src + '\nreturn { pointInPolygon, storesInPolygon, clusterPoints };')();
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => {
@@ -60,6 +60,35 @@ ok('selects the right ids',                 hit.map(s => s.id).join(',') === '1,
 const world = [{lat:-89,lng:-179},{lat:-89,lng:179},{lat:89,lng:179},{lat:89,lng:-179}];
 ok('control positive: world polygon selects all 4', storesInPolygon(stores, world).length === 4);
 ok('empty polygon selects none',                    storesInPolygon(stores, []).length === 0);
+
+// ---------------------------------------------------------------------------
+// Clustering. At 2,000 stores the map merges nearby pins into numbered bubbles.
+// The dangerous failure is not an ugly map - it is a store silently vanishing,
+// which looks identical to "it was never in the database". So the tests pin the
+// conservation properties first: nothing lost, nothing duplicated.
+console.log('\nclusterPoints');
+const grid = [];
+for (let i = 0; i < 500; i++) grid.push({ id: i, x: (i % 25) * 7, y: Math.floor(i / 25) * 7 });
+
+const clustered = clusterPoints(grid, 40);
+const seen = new Set();
+let dupes = 0;
+clustered.forEach(c => c.items.forEach(p => { if (seen.has(p.id)) dupes++; seen.add(p.id); }));
+ok('every point lands in exactly one cluster', seen.size === 500 && dupes === 0);
+ok('cluster counts sum to the input size',
+   clustered.reduce((a, c) => a + c.count, 0) === 500);
+ok('control positive: it really did group them', clustered.length < 500);
+ok('count matches the items array', clustered.every(c => c.count === c.items.length));
+
+const far = [{ id:1, x:0, y:0 }, { id:2, x:1000, y:1000 }];
+ok('points far apart are not merged', clusterPoints(far, 40).length === 2);
+const near = [{ id:1, x:10, y:10 }, { id:2, x:12, y:11 }];
+ok('points in the same cell are merged', clusterPoints(near, 40).length === 1);
+ok('a merged cluster sits between its members',
+   (() => { const c = clusterPoints(near, 40)[0]; return c.x === 11 && c.y === 10.5; })());
+ok('cellSize 0 disables clustering rather than dividing by zero',
+   clusterPoints(grid, 0).length === 500);
+ok('empty input gives no clusters', clusterPoints([], 40).length === 0);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

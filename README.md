@@ -26,8 +26,8 @@ The selection engine is identical in both modes; only the tiles change.
 ## Tests
 
 ```
-node test-selection.js        # 14 assertions on the selection engine
-python3 test_ui.py            # 16 assertions driving the real browser + screenshots
+node test-selection.js        # 23 assertions on the selection + clustering engines
+python3 test_ui.py            # 30 assertions driving the real browser + screenshots
 node server/test_geocoder.js  # 16 assertions on the geocoder (stubbed fetch, no cost)
 node server/test_api.js       # 32 assertions: real Express + real MySQL + real HTTP
 ```
@@ -56,6 +56,39 @@ npm install && node server/test_api.js
 Migration 001 is the one that runs on your VPS; 000 only stands in for the `stores` table
 you already have, so the migration can be proven against a real MySQL 8 before it touches
 your database.
+
+## At your real scale: 2,000 stores
+
+Your database holds roughly 2,000 stores in three categories (Active, Potential,
+Chain). **Load 2,000 stores** in the left panel loads a stress set of that size so
+the behaviour can be seen and measured rather than assumed.
+
+Measured in Chromium at 1280×720, on the full 2,000:
+
+| | |
+|---|---|
+| Selecting with a city-wide polygon | **0.4 ms** (1,856 stores selected) |
+| Redrawing every pin after a change | **17.7 ms** |
+| Shapes drawn, clustered vs one-per-store | **334 vs 2,000** |
+
+So the polygon selection is not the problem at this size — it is thousands of times
+faster than a single frame. Two things did need handling:
+
+**Clustering.** 2,000 individual pins is unreadable (`shots/6-...png` — central
+Madrid becomes a solid blob) and slow on Google Maps, which builds a DOM element
+per marker. Nearby pins merge into a numbered bubble that splits apart as you zoom;
+on Google Maps, clicking a bubble zooms to fit its members. A bubble is coloured by
+category when everything in it shares one, and grey when it is mixed.
+
+The clustering is a pure function like the selection engine, for the same reason:
+the tests pin down that **every store lands in exactly one cluster, never dropped
+and never double-counted**. A clustering bug that quietly loses a pin looks exactly
+like "that store was never in the database", which is the kind of bug that gets
+blamed on the data for weeks.
+
+**The selected list is capped at 200 rows.** Selecting half the city would otherwise
+mean 1,000 rows of DOM rebuilt on every change, and nobody reads row 700. The panel
+says how many are hidden; Export CSV always writes the full selection.
 
 ## How this maps onto your stack
 
