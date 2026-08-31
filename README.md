@@ -23,15 +23,19 @@ The selection engine is identical in both modes; only the tiles change.
 4. Untick a category — those markers and list rows drop out.
 5. **Drag a pin** to correct where geocoding put it. It gets a dark centre dot and
    an **adjusted** badge, and **Undo move** appears in the left panel.
-6. **Export CSV** downloads the current selection.
+6. **Pins worth checking** filters to the ones Google placed imprecisely — the
+   short list actually worth a person's time.
+7. **Export CSV** downloads the current selection.
 
 ## Tests
 
 ```
 node test-selection.js        # 23 assertions on the selection + clustering engines
-python3 test_ui.py            # 45 assertions driving the real browser + screenshots
+python3 test_ui.py            # 54 assertions driving the real browser + screenshots
+node server/test_schema.js    # 33 assertions on the table/column config (no database)
 node server/test_geocoder.js  # 16 assertions on the geocoder (stubbed fetch, no cost)
-node server/test_api.js       # 43 assertions: real Express + real MySQL + real HTTP
+node server/test_api.js       # 60 assertions: real Express + real MySQL + real HTTP
+node server/test_batch.js     # 39 assertions on the bulk geocoding run (real MySQL)
 ```
 
 `test_ui.py` and `test_api.js` both re-implement point-in-polygon independently and assert
@@ -52,7 +56,7 @@ mysqld --no-defaults --datadir=$D/data --basedir=/usr --port=13306 \
 mysql --no-defaults -h 127.0.0.1 -P 13306 -u root -e "CREATE DATABASE crmtest"
 mysql --no-defaults -h 127.0.0.1 -P 13306 -u root crmtest < server/migrations/000_stores_table_for_testing.sql
 mysql --no-defaults -h 127.0.0.1 -P 13306 -u root crmtest < server/migrations/001_add_store_location.sql
-npm install && node server/test_api.js
+npm install && node server/test_api.js && node server/test_batch.js
 ```
 
 Migration 001 is the one that runs on your VPS; 000 only stands in for the `stores` table
@@ -125,6 +129,71 @@ The API tests cover both directions: that a manual pin survives `force=1`, and t
 control positive that the same call still re-geocodes a machine-placed pin — so
 "nothing happened" can't be mistaken for the guard working.
 
+## Your table is not called `stores`
+
+Everything here is written against a table called `stores` with a column called
+`category`, because that is a guess. **`server/schema.js` is the one file to
+edit** — change the names there and the migration, all five endpoints, the bulk
+geocoder and the tests all follow. Or set them without editing anything:
+
+```sh
+STORES_TABLE=tiendas STORES_CATEGORY_COL=categoria node server/print-migration.js
+```
+
+`print-migration.js` prints migration 001 with your names already filled in, so the
+SQL you run and the SQL the API expects come from the same place. Hand-editing the
+`.sql` to match your table is exactly how you end up with an API querying
+`stores.latitude` against a database that has `tiendas.lat` — which fails at
+runtime, in front of a user, rather than at migration time.
+
+Table and column names can't be passed as query parameters, so they get
+concatenated into the SQL. `schema.js` therefore validates every one of them
+against a strict identifier pattern and **rejects** rather than sanitises: a
+config typo should stop the process, not quietly query a different table. The test
+suite feeds it backtick escapes, statement separators, qualified names and
+over-length strings, and asserts each is refused.
+
+The API and batch tests both run their whole flow a second time against a table
+called `tiendas` with columns `id_tienda / nombre / categoria / direccion / lat /
+lng / geo_at / origen / precision_geo` — so "it will fit your schema" is measured,
+not hoped for.
+
+## Geocoding 2,000 addresses
+
+`server/geocode-batch.js` does the bulk run. It is built around the assumption that
+it will be interrupted:
+
+```sh
+node server/geocode-batch.js --dry-run       # costs nothing, tells you the size
+node server/geocode-batch.js --limit 100     # do 100 for real, check the bill
+node server/geocode-batch.js --limit 2000
+```
+
+- **`--limit` defaults to 100 and caps at 5,000.** A loop over a table you thought
+  had 2,000 rows, that turns out to have 200,000, should not be something you find
+  out about from an invoice.
+- **Re-runnable.** It only picks up rows that still need doing, so quota errors,
+  a dropped connection or Ctrl-C cost you nothing — run it again.
+- **An address Google can't resolve is stamped and then left alone**, so it is not
+  paid for again on every future run. `--retry-failed` picks those back up once
+  you have corrected the addresses.
+- **It stops on the first quota or permission error** instead of burning through
+  the rest of the batch failing identically.
+- **It never touches a hand-corrected pin.**
+
+### Finding the ones that came out wrong
+
+Google returns how confident it was about each address, and we store it in
+`location_precision`. `ROOFTOP` means it found the building; `APPROXIMATE` means it
+fell back to the town.
+
+On the 2,000-store demo set, **157 pins (7.8%) come back imprecise**. That is the
+difference between "check 2,000 pins" — which nobody does, so the wrong ones stay
+wrong — and "check 157". `GET /api/stores/needs-review` returns exactly that list,
+worst first. In the demo, **Pins worth checking** in the left panel filters to them
+and draws them hollow, so they are findable on the map. Drag one and it becomes an
+adjusted pin, permanently protected from the next re-geocode.
+
 ## How this maps onto your stack
 
 Your CRM: React + TypeScript front end, Node + Express back end, MySQL, VPS on Hostinger.
@@ -148,6 +217,7 @@ re-geocode — see "Correcting a pin by hand" above.
 | `PATCH`| `/api/stores/:id/location` | save corrected coordinates |
 | `POST` | `/api/stores/:id/geocode` | address → lat/lng, cached in `geocoded_at` |
 | `POST` | `/api/stores/in-polygon` | body: polygon vertices → the stores inside |
+| `GET`  | `/api/stores/needs-review` | the pins Google itself was unsure about |
 
 The router takes a `db` with `query(sql, params)` — exactly what `mysql2/promise` gives you:
 

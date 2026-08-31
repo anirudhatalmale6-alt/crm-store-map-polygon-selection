@@ -117,6 +117,39 @@ with sync_playwright() as p:
     ok("clear removes the polygon from the map",
        len(page.query_selector_all("#offline svg polygon")) == 0)
 
+    # ---------- pins Google was unsure about ----------
+    # The point of storing Google's confidence is that nobody checks 2,000 pins by
+    # eye. What must be true is that the short list is the RIGHT short list.
+    print("\npins worth checking")
+    flagged = page.evaluate("stores.filter(needsReview).map(s => s.name).sort()")
+    ok("some pins are flagged for review (control positive)", len(flagged) > 0, flagged)
+    ok("but not all of them — that would be useless",
+       len(flagged) < page.evaluate("stores.length"), flagged)
+    ok("the sidebar count matches the data",
+       page.text_content("#reviewCount") == str(len(flagged)),
+       f'ui={page.text_content("#reviewCount")} data={len(flagged)}')
+    ok("only imprecise geocodes are flagged",
+       page.evaluate("stores.filter(needsReview)"
+                     ".every(s => ['APPROXIMATE','GEOMETRIC_CENTER'].includes(s.prec))"))
+    ok("precise pins are not flagged",
+       page.evaluate("stores.filter(s => s.prec === 'ROOFTOP').every(s => !needsReview(s))"))
+
+    page.check("#reviewBox")
+    shown_names = sorted(page.evaluate("visibleStores().map(s => s.name)"))
+    ok("the filter shows exactly the flagged pins", shown_names == flagged,
+       f"ui={shown_names} want={flagged}")
+    drawn = len(page.query_selector_all("#offline svg circle.pin"))
+    ok("and the map draws only those", drawn == len(flagged), f"drawn={drawn} want={len(flagged)}")
+    # Hollow, not a different colour: the category colour still has to be readable.
+    ok("flagged pins are drawn hollow",
+       all(c.get_attribute("fill") == "none"
+           for c in page.query_selector_all("#offline svg circle.pin")))
+    shot("9-needs-review.png")
+    page.uncheck("#reviewBox")
+    ok("unticking restores every pin",
+       len(page.query_selector_all("#offline svg circle.pin")) == total,
+       len(page.query_selector_all("#offline svg circle.pin")))
+
     # ---------- manual correction: drag a pin ----------
     # Geocoding is never perfect, so a person has to be able to drag a pin onto the
     # right spot. The thing that must be true is that the drag lands where the mouse

@@ -9,13 +9,14 @@
  *   const db    = { query: async (sql, p) => (await pool.query(sql, p))[0] };
  *   app.use('/api/stores', require('./stores.routes')({ db, geocode }));
  *
- * `geocode` is any async (address) -> {lat, lng} | null. See geocoder.js.
+ * `geocode` is any async (address) -> {lat, lng, precision} | null. See geocoder.js.
+ *
+ * Table and column names come from schema.js — pass `schema` to override them.
+ * No table or column name is hard-coded below.
  */
 const express = require('express');
 const { storesInPolygon, polygonBounds, parsePolygon } = require('./geo');
-
-const SELECT_COLS =
-  'id, name, category, latitude AS lat, longitude AS lng, address, location_source';
+const { makeSchema } = require('./schema');
 
 /** rows come back with lat/lng as strings from some drivers; normalise once. */
 function toStore(r) {
@@ -27,18 +28,20 @@ function toStore(r) {
     lat: r.lat === null ? null : Number(r.lat),
     lng: r.lng === null ? null : Number(r.lng),
     locationSource: r.location_source || null,
+    locationPrecision: r.location_precision || null,
   };
 }
 
-module.exports = function storeRoutes({ db, geocode }) {
+module.exports = function storeRoutes({ db, geocode, schema = makeSchema() }) {
   const router = express.Router();
+  const { q, table, selectCols } = schema;
 
   /* GET /api/stores?bbox=minLng,minLat,maxLng,maxLat
      Stores with coordinates. bbox is optional; without it you get all of them. */
   router.get('/', async (req, res, next) => {
     try {
-      let sql = `SELECT ${SELECT_COLS} FROM stores
-                 WHERE latitude IS NOT NULL AND longitude IS NOT NULL`;
+      let sql = `SELECT ${selectCols} FROM ${table}
+                 WHERE ${q.latitude} IS NOT NULL AND ${q.longitude} IS NOT NULL`;
       const params = [];
       if (req.query.bbox) {
         const n = String(req.query.bbox).split(',').map(Number);
@@ -46,11 +49,36 @@ module.exports = function storeRoutes({ db, geocode }) {
           return res.status(400).json({ error: 'bbox must be minLng,minLat,maxLng,maxLat' });
         }
         const [minLng, minLat, maxLng, maxLat] = n;
-        sql += ' AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?';
+        sql += ` AND ${q.latitude} BETWEEN ? AND ? AND ${q.longitude} BETWEEN ? AND ?`;
         params.push(minLat, maxLat, minLng, maxLng);
       }
       const rows = await db.query(sql, params);
       res.json({ stores: rows.map(toStore) });
+    } catch (e) { next(e); }
+  });
+
+  /* GET /api/stores/needs-review
+     The stores worth checking by hand: Google itself said it was not sure where
+     they are. Geocoding 2,000 addresses always leaves a tail of bad ones, and
+     without this the only way to find them is to stare at 2,000 pins. */
+  router.get('/needs-review', async (req, res, next) => {
+    try {
+      const rows = await db.query(
+        `SELECT ${selectCols} FROM ${table}
+          WHERE ${q.source} = 'geocoded'
+            AND (${q.precision} IN ('APPROXIMATE', 'GEOMETRIC_CENTER')
+                 OR ${q.latitude} IS NULL)
+          ORDER BY ${q.precision} = 'APPROXIMATE' DESC, ${q.id}`, []
+      );
+      const stores = rows.map(toStore);
+      res.json({
+        stores,
+        count: stores.length,
+        // Split out so the number is actionable: "no coordinates at all" needs a
+        // better address, "approximate" needs someone to drag the pin.
+        unlocated: stores.filter(s => s.lat === null).length,
+        imprecise: stores.filter(s => s.lat !== null).length,
+      });
     } catch (e) { next(e); }
   });
 
@@ -64,9 +92,9 @@ module.exports = function storeRoutes({ db, geocode }) {
 
       const b = polygonBounds(parsed.polygon);
       const rows = await db.query(
-        `SELECT ${SELECT_COLS} FROM stores
-          WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-            AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?`,
+        `SELECT ${selectCols} FROM ${table}
+          WHERE ${q.latitude} IS NOT NULL AND ${q.longitude} IS NOT NULL
+            AND ${q.latitude} BETWEEN ? AND ? AND ${q.longitude} BETWEEN ? AND ?`,
         [b.minLat, b.maxLat, b.minLng, b.maxLng]
       );
       const inside = storesInPolygon(rows.map(toStore), parsed.polygon);
@@ -89,8 +117,9 @@ module.exports = function storeRoutes({ db, geocode }) {
         return res.status(400).json({ error: 'lng must be a number between -180 and 180' });
       }
       const r = await db.query(
-        `UPDATE stores SET latitude = ?, longitude = ?, location_source = 'manual'
-          WHERE id = ?`,
+        `UPDATE ${table} SET ${q.latitude} = ?, ${q.longitude} = ?,
+                             ${q.source} = 'manual', ${q.precision} = NULL
+          WHERE ${q.id} = ?`,
         [lat, lng, req.params.id]
       );
       if (r && r.affectedRows === 0) return res.status(404).json({ error: 'store not found' });
@@ -105,7 +134,8 @@ module.exports = function storeRoutes({ db, geocode }) {
   router.post('/:id/geocode', async (req, res, next) => {
     try {
       const rows = await db.query(
-        `SELECT ${SELECT_COLS}, geocoded_at FROM stores WHERE id = ?`, [req.params.id]
+        `SELECT ${selectCols}, ${q.geocodedAt} FROM ${table} WHERE ${q.id} = ?`,
+        [req.params.id]
       );
       if (!rows.length) return res.status(404).json({ error: 'store not found' });
       const store = toStore(rows[0]);
@@ -132,13 +162,15 @@ module.exports = function storeRoutes({ db, geocode }) {
       if (!hit) return res.status(422).json({ error: 'address could not be geocoded' });
 
       await db.query(
-        `UPDATE stores SET latitude = ?, longitude = ?, geocoded_at = NOW(),
-                           location_source = 'geocoded'
-          WHERE id = ?`,
-        [hit.lat, hit.lng, store.id]
+        `UPDATE ${table} SET ${q.latitude} = ?, ${q.longitude} = ?,
+                             ${q.geocodedAt} = NOW(), ${q.source} = 'geocoded',
+                             ${q.precision} = ?
+          WHERE ${q.id} = ?`,
+        [hit.lat, hit.lng, hit.precision || null, store.id]
       );
       res.json({ ...store, lat: hit.lat, lng: hit.lng,
-                 locationSource: 'geocoded', cached: false });
+                 locationSource: 'geocoded', locationPrecision: hit.precision || null,
+                 cached: false });
     } catch (e) { next(e); }
   });
 

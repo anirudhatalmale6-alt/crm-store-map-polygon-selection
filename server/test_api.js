@@ -217,6 +217,99 @@ const SEED = [
   ok('locationSource is exposed to the front end so it can show the badge',
      r.body.stores.every(s => 'locationSource' in s), r.body.stores[0]);
 
+  /* GET /needs-review — the short list of pins worth a human's time.
+     Geocoding 2,000 addresses always leaves a tail of bad ones. Without this the
+     only way to find them is to look at 2,000 pins, which nobody does, so the bad
+     ones just stay wrong. */
+  console.log('\nGET /api/stores/needs-review');
+  await db.query(`UPDATE stores SET location_source='geocoded', location_precision='ROOFTOP'
+                   WHERE latitude IS NOT NULL`);
+  await db.query(`UPDATE stores SET location_precision='APPROXIMATE' WHERE id=3`);
+  await db.query(`UPDATE stores SET location_precision='GEOMETRIC_CENTER' WHERE id=4`);
+  await db.query(`UPDATE stores SET location_source='manual', location_precision=NULL WHERE id=6`);
+
+  r = await get('/needs-review');
+  const flagged = r.body.stores.map(s => s.id).sort((a, b) => a - b);
+  ok('lists exactly the imprecise pins', JSON.stringify(flagged) === '[3,4]', flagged);
+  ok('count matches the array', r.body.count === r.body.stores.length, r.body);
+  // Control positive: a query that returned everything, or nothing, would pass a
+  // sloppier assertion. There must be precise pins that are deliberately absent.
+  const all = (await get('/')).body.stores;
+  ok('control positive: there are precise pins it correctly left out',
+     all.length > flagged.length, { all: all.length, flagged: flagged.length });
+  ok('a ROOFTOP pin is not flagged', !flagged.includes(1), flagged);
+  ok('a hand-adjusted pin is never flagged for review', !flagged.includes(6), flagged);
+  ok('the worst ones come first', r.body.stores[0].locationPrecision === 'APPROXIMATE', r.body.stores[0]);
+  ok('precision is exposed to the front end', r.body.stores.every(s => 'locationPrecision' in s));
+
+  /* The whole router against a table and columns named nothing like the defaults.
+     This is the assertion that says milestone 1 will fit the client's CRM whatever
+     their names turn out to be - rather than me hoping they happen to match. */
+  console.log('\nthe same router against a renamed table');
+  const { makeSchema } = require('./schema');
+  await db.query('DROP TABLE IF EXISTS tiendas');
+  await db.query(`CREATE TABLE tiendas (
+     id_tienda INT AUTO_INCREMENT PRIMARY KEY, nombre VARCHAR(191) NOT NULL,
+     categoria VARCHAR(64) NOT NULL, direccion VARCHAR(255) NULL,
+     lat DOUBLE NULL, lng DOUBLE NULL, geo_at DATETIME NULL,
+     origen ENUM('geocoded','manual') NULL, precision_geo VARCHAR(24) NULL)`);
+  for (const [n, c, la, lo, p] of [
+    ['Sol ES', 'activa', 40.4169, -3.7035, 'ROOFTOP'],
+    ['Chueca ES', 'potencial', 40.4235, -3.6975, 'APPROXIMATE'],
+    ['Lejos ES', 'cadena', 41.9, -3.0, 'ROOFTOP'],
+  ]) {
+    await db.query(`INSERT INTO tiendas (nombre, categoria, direccion, lat, lng, origen, precision_geo)
+                    VALUES (?,?,?,?,?,'geocoded',?)`, [n, c, n + ' address', la, lo, p]);
+  }
+  const esSchema = makeSchema({
+    table: 'tiendas', id: 'id_tienda', name: 'nombre', category: 'categoria',
+    address: 'direccion', latitude: 'lat', longitude: 'lng', geocodedAt: 'geo_at',
+    source: 'origen', precision: 'precision_geo',
+  }, {});
+  const esApp = express();
+  esApp.use(express.json());
+  esApp.use('/api/stores', storeRoutes({ db, geocode, schema: esSchema }));
+  const esServer = esApp.listen(0);
+  await new Promise(r2 => esServer.once('listening', r2));
+  const esBase = `http://127.0.0.1:${esServer.address().port}/api/stores`;
+  const esGet = async (u) => { const x = await fetch(esBase + u); return { status: x.status, body: await x.json() }; };
+  const esSend = async (m, u, body) => {
+    const x = await fetch(esBase + u, { method: m, headers: { 'content-type': 'application/json' },
+                                        body: JSON.stringify(body) });
+    return { status: x.status, body: await x.json() };
+  };
+
+  let e = await esGet('/');
+  ok('GET works and aliases the renamed columns back',
+     e.body.stores.length === 3 && e.body.stores.every(s => typeof s.lat === 'number'), e.body);
+  ok('the renamed name column comes back as `name`',
+     e.body.stores.map(s => s.name).includes('Sol ES'), e.body.stores);
+  ok('the renamed category column comes back as `category`',
+     e.body.stores.every(s => typeof s.category === 'string'), e.body.stores[0]);
+
+  e = await esGet('/?bbox=-3.75,40.40,-3.65,40.45');
+  ok('bbox filtering works on the renamed columns', e.body.stores.length === 2, e.body.stores.map(s => s.name));
+
+  e = await esSend('POST', '/in-polygon', { polygon: [
+    { lat: 40.40, lng: -3.75 }, { lat: 40.45, lng: -3.75 },
+    { lat: 40.45, lng: -3.65 }, { lat: 40.40, lng: -3.65 }] });
+  ok('polygon selection works on the renamed table', e.body.count === 2, e.body);
+  ok('control positive: the far store was correctly excluded',
+     !e.body.stores.some(s => s.name === 'Lejos ES'), e.body.stores.map(s => s.name));
+
+  e = await esSend('PATCH', '/1/location', { lat: 40.1, lng: -3.1 });
+  ok('PATCH writes to the renamed columns', e.status === 200, e);
+  const esRow = (await db.query('SELECT lat, origen FROM tiendas WHERE id_tienda=1'))[0];
+  ok('...and the value really landed there', Number(esRow.lat) === 40.1, esRow);
+  ok('...and marked the renamed source column manual', esRow.origen === 'manual', esRow);
+
+  e = await esGet('/needs-review');
+  ok('needs-review works on the renamed table',
+     e.body.stores.length === 1 && e.body.stores[0].name === 'Chueca ES', e.body.stores);
+
+  esServer.close();
+  await db.query('DROP TABLE tiendas');
+
   console.log('\nquery plan');
   const plan = await db.query(
     `EXPLAIN SELECT id FROM stores

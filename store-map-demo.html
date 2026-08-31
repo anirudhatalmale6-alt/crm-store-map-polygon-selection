@@ -68,6 +68,7 @@
   .log div{padding:2px 0;border-bottom:1px solid #232a32}
   .del{background:transparent;border:none;color:#6e7c8a;padding:2px 6px;cursor:pointer;font-size:15px;line-height:1}
   .del:hover{color:#ff6b6b}
+  .badge.warn{color:#ffb454;border-color:#ffb454}
   .badge{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;
          color:var(--accent);border:1px solid var(--accent);border-radius:99px;
          padding:0 6px;margin-left:5px;vertical-align:1px}
@@ -125,6 +126,17 @@
          A re-geocode will never move it back.</p>
       <button class="ghost" id="undoBtn" style="width:100%;display:none">Undo move</button>
       <p class="hint" id="manualNote"></p>
+    </div>
+
+    <div class="section">
+      <h2>Pins worth checking</h2>
+      <label style="display:flex;align-items:center;gap:7px;font-size:12.5px">
+        <input type="checkbox" id="reviewBox"> Show only these
+        <span class="count" id="reviewCount">0</span>
+      </label>
+      <p class="hint" id="reviewNote"></p>
+      <p class="hint">Google reports how sure it was about every address. Rather than
+         checking 2,000 pins, you check these &mdash; they are drawn hollow on the map.</p>
     </div>
 
     <div class="section">
@@ -238,8 +250,15 @@ let nextId = 1;
 /* `src` mirrors the location_source column: null = never positioned,
    'geocoded' = Google put it there, 'manual' = a person dragged it and it is
    protected from being re-geocoded. */
-const mk = (name, cat, lat, lng, src = 'geocoded') =>
-  ({ id: nextId++, name, cat, lat, lng, src });
+/* `prec` mirrors location_precision: Google's own confidence in the coordinates it
+   returned. ROOFTOP means it found the building; APPROXIMATE means it fell back to
+   the town. Storing it is what turns "geocoding is imperfect" from a vague worry
+   into a short, specific list of pins for someone to fix. */
+const mk = (name, cat, lat, lng, src = 'geocoded', prec = 'ROOFTOP') =>
+  ({ id: nextId++, name, cat, lat, lng, src, prec });
+
+const VAGUE = new Set(['APPROXIMATE', 'GEOMETRIC_CENTER']);
+const needsReview = s => s.src === 'geocoded' && VAGUE.has(s.prec);
 
 let stores = [
   mk('Gran Vía 34',        'chain',     40.4203, -3.7058),
@@ -254,17 +273,17 @@ let stores = [
   mk('Goya',               'active',    40.4245, -3.6780),
   mk('Retiro',             'potential', 40.4185, -3.6830),
   mk('Atocha',             'active',    40.4075, -3.6905),
-  mk('Lavapiés',           'potential', 40.4090, -3.7010),
+  mk('Lavapiés',           'potential', 40.4090, -3.7010, 'geocoded', 'APPROXIMATE'),
   mk('La Latina',          'active',    40.4115, -3.7095),
   mk('Plaza España',       'potential', 40.4235, -3.7125),
   mk('Argüelles',          'active',    40.4300, -3.7160),
-  mk('Moncloa',            'potential', 40.4350, -3.7190),
+  mk('Moncloa',            'potential', 40.4350, -3.7190, 'geocoded', 'GEOMETRIC_CENTER'),
   mk('Chamberí',           'active',    40.4340, -3.7040),
   mk('Nuevos Ministerios', 'chain',     40.4460, -3.6925),
   mk('Cuatro Caminos',     'potential', 40.4465, -3.7040),
   mk('Salamanca Norte',    'potential', 40.4345, -3.6805),
-  mk('Prosperidad',        'active',    40.4430, -3.6740),
-  mk('Delicias',           'potential', 40.3985, -3.6935),
+  mk('Prosperidad',        'active',    40.4430, -3.6740, 'geocoded', 'GEOMETRIC_CENTER'),
+  mk('Delicias',           'potential', 40.3985, -3.6935, 'geocoded', 'APPROXIMATE'),
   mk('Legazpi',            'active',    40.3910, -3.6950),
 ];
 
@@ -306,8 +325,12 @@ function makeBulkStores(n) {
     // make every cluster mixed, and every bubble on the map the same grey.
     const sector = Math.floor(a / ((Math.PI * 2) / 3));
     const cat = CATEGORIES[(sector + DISTRICTS.indexOf(d)) % CATEGORIES.length].id;
+    // About 8% come back imprecise, which is a realistic tail for a real address
+    // list. Deterministic, so the review count is the same on every run.
+    const h = hash01(i + 0.53);
+    const prec = h < 0.045 ? 'APPROXIMATE' : h < 0.08 ? 'GEOMETRIC_CENTER' : 'ROOFTOP';
     out.push(mk(`Store ${i + 1}`, cat,
-                d.lat + rad * Math.sin(a), d.lng + rad * Math.cos(a)));
+                d.lat + rad * Math.sin(a), d.lng + rad * Math.cos(a), 'geocoded', prec));
   }
   return out;
 }
@@ -316,6 +339,7 @@ let polygon = [];      // [{lat,lng}]
 let selectedIds = new Set();
 let drawing = false;
 let hidden = new Set(); // category ids toggled off
+let reviewOnly = false;  // show only the pins Google was unsure about
 let clustering = true;  // merge nearby pins into a numbered bubble
 const CELL_PX = 48;     // cluster grid size in screen pixels
 
@@ -324,7 +348,10 @@ const CELL_PX = 48;     // cluster grid size in screen pixels
  * ------------------------------------------------------------------ */
 const $ = id => document.getElementById(id);
 
-function visibleStores() { return stores.filter(s => !hidden.has(s.cat)); }
+function visibleStores() {
+  return stores.filter(s => !hidden.has(s.cat) && (!reviewOnly || needsReview(s)));
+}
+function reviewCount() { return stores.filter(needsReview).length; }
 
 function recompute() {
   const t0 = performance.now();
@@ -385,7 +412,7 @@ function renderSelection() {
         <div class="store">
           <span class="dot" style="background:${catById[s.cat].color}"></span>
           <span style="flex:1;min-width:0">
-            <b>${s.name}</b>${s.src === 'manual' ? '<span class="badge">adjusted</span>' : ''}
+            <b>${s.name}</b>${s.src === 'manual' ? '<span class="badge">adjusted</span>' : ''}${needsReview(s) ? '<span class="badge warn">check</span>' : ''}
             <small>${catById[s.cat].label} &middot; ${s.lat.toFixed(4)}, ${s.lng.toFixed(4)}</small>
           </span>
           <button class="del" data-del="${s.id}" title="Delete from CRM">&times;</button>
@@ -394,6 +421,7 @@ function renderSelection() {
   $('selList').querySelectorAll('[data-del]').forEach(b => {
     b.onclick = () => removeStore(Number(b.dataset.del));
   });
+  renderReview();
   const n = manualCount();
   $('manualNote').textContent = n
     ? `${n} store${n === 1 ? '' : 's'} adjusted by hand — protected from re-geocoding.`
@@ -439,7 +467,9 @@ function moveStore(id, lat, lng, { manual = false } = {}) {
   // telling us where one of its own stores is.
   if (manual) lastMove = { id, lat: s.lat, lng: s.lng, src: s.src, name: s.name };
   s.lat = lat; s.lng = lng;
-  if (manual) s.src = 'manual';
+  // A hand-placed pin has no geocoder confidence to report - a person put it there.
+  // Mirrors the API, which sets location_precision = NULL on a manual correction.
+  if (manual) { s.src = 'manual'; s.prec = null; }
   log(`${manual ? '~ adjusted' : '~ moved'} "${s.name}" to ${lat.toFixed(5)}, ${lng.toFixed(5)}`);
   renderUndo();
   recompute();
@@ -463,6 +493,15 @@ function renderUndo() {
 }
 
 function manualCount() { return stores.filter(s => s.src === 'manual').length; }
+
+function renderReview() {
+  const n = reviewCount();
+  $('reviewCount').textContent = n;
+  $('reviewNote').textContent = n
+    ? `Google placed these on a street or a district rather than a building. Everything else it found exactly.`
+    : 'Nothing flagged - every pin was placed precisely.';
+  $('reviewBox').disabled = n === 0;
+}
 
 /* ------------------------------------------------------------------ *
  * 4. Map surfaces. Both call recompute(); only rendering differs.
@@ -510,10 +549,16 @@ const OfflineSurface = (() => {
         const s = g.items[0], on = selectedIds.has(s.id);
         // data-sid is what makes the pin draggable: the drag handler looks the
         // store up by it rather than by hit-testing coordinates.
+        // A pin Google was unsure about is drawn hollow: same colour so you can
+        // still read its category, but obviously unfinished.
+        const vague = needsReview(s);
         return `<g>
           <circle class="pin" data-sid="${s.id}" cx="${g.x}" cy="${g.y}" r="${on ? 9 : 6}"
-                  fill="${catById[s.cat].color}" stroke="${on ? '#fff' : '#0f1216'}"
-                  stroke-width="${on ? 2.5 : 1.5}" opacity="${on ? 1 : .82}"/>
+                  fill="${vague ? 'none' : catById[s.cat].color}"
+                  stroke="${vague ? catById[s.cat].color : (on ? '#fff' : '#0f1216')}"
+                  stroke-width="${vague ? 2.5 : (on ? 2.5 : 1.5)}"
+                  stroke-dasharray="${vague ? '3 2' : '0'}"
+                  opacity="${on ? 1 : .82}"/>
           ${s.src === 'manual'
             ? `<circle class="pin" data-sid="${s.id}" cx="${g.x}" cy="${g.y}" r="2.4"
                        fill="#0f1216" pointer-events="none"/>` : ''}
@@ -703,10 +748,14 @@ const GoogleSurface = (() => {
         : { lat: g.items.reduce((a, i) => a + i.lat, 0) / g.count,
             lng: g.items.reduce((a, i) => a + i.lng, 0) / g.count };
 
+      const vague = single && needsReview(s);
       const icon = {
         path: google.maps.SymbolPath.CIRCLE,
-        fillColor: colour, fillOpacity: 1,
-        strokeColor: selIn ? '#ffffff' : '#0f1216', strokeWeight: selIn ? 3 : 1.5,
+        // Hollow = Google was not confident where this one is. Same colour, so the
+        // category is still readable.
+        fillColor: colour, fillOpacity: vague ? 0 : 1,
+        strokeColor: vague ? colour : (selIn ? '#ffffff' : '#0f1216'),
+        strokeWeight: vague ? 2.5 : (selIn ? 3 : 1.5),
         scale: single ? (selIn ? 9 : 6) : Math.min(22, 10 + Math.log2(g.count) * 3),
       };
       const label = single ? null
@@ -781,6 +830,7 @@ $('clearBtn').onclick = () => { surface.clear(); $('drawBtn').textContent = 'Dra
 
 $('clusterBox').onchange = e => { clustering = e.target.checked; recompute(); };
 $('undoBtn').onclick = undoMove;
+$('reviewBox').onchange = e => { reviewOnly = e.target.checked; recompute(); };
 
 $('bulkBtn').onclick = () => {
   if (stores.length > 500) return;
