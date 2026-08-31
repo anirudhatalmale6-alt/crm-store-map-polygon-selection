@@ -117,6 +117,110 @@ with sync_playwright() as p:
     ok("clear removes the polygon from the map",
        len(page.query_selector_all("#offline svg polygon")) == 0)
 
+    # ---------- manual correction: drag a pin ----------
+    # Geocoding is never perfect, so a person has to be able to drag a pin onto the
+    # right spot. The thing that must be true is that the drag lands where the mouse
+    # was released - not merely that "something moved".
+    print("\ndrag a pin to correct its position")
+
+    # The offline surface's projection, re-derived here from its bounds rather than
+    # read out of the page, so a wrong projection would show up as a failure.
+    B = {"minLat": 40.360, "maxLat": 40.478, "minLng": -3.775, "maxLng": -3.625}
+    box = page.locator("#offline").bounding_box()
+    to_lat = lambda py: B["maxLat"] - (py / box["height"]) * (B["maxLat"] - B["minLat"])
+    to_lng = lambda px: B["minLng"] + (px / box["width"]) * (B["maxLng"] - B["minLng"])
+
+    ok("nothing is pending undo before the first drag", not page.is_visible("#undoBtn"))
+
+    # Pick a pin with no neighbour on top of it. Madrid's centre has stores 60 m
+    # apart, which overlap at this zoom - grabbing one of those drags whichever
+    # circle the browser painted last, so the test would be about a store other
+    # than the one it names.
+    sid = page.evaluate("stores.find(s => s.name === 'Legazpi').id")
+    pin = page.query_selector(f'#offline svg circle.pin[data-sid="{sid}"]')
+    before = page.evaluate("id => { const s = stores.find(x=>x.id===id); return {lat:s.lat, lng:s.lng, src:s.src}; }", sid)
+    ok("a pin starts out marked as geocoded, not manual", before["src"] == "geocoded", before)
+
+    pb = pin.bounding_box()
+    grab = [pb["x"] + pb["width"] / 2, pb["y"] + pb["height"] / 2]
+    top = page.evaluate("([x,y]) => { const e = document.elementFromPoint(x,y);"
+                        "return e && e.getAttribute('data-sid'); }", grab)
+    ok("the pin under the cursor really is the one being tested", top == str(sid),
+       f"grabbing sid={sid} but the topmost element is sid={top}")
+
+    # Whole pixels. The browser truncates mouse coordinates to integers, so a
+    # fractional target would leave the expectation ~1 px off the position the page
+    # actually receives - and a loose tolerance to absorb that would hide a real
+    # projection bug of the same size.
+    tx = float(round(box["x"] + box["width"] * 0.40))
+    ty = float(round(box["y"] + box["height"] * 0.72))
+    page.mouse.move(grab[0], grab[1])
+    page.mouse.down()
+    page.mouse.move(tx, ty, steps=12)
+    page.mouse.up()
+
+    after = page.evaluate("id => { const s = stores.find(x=>x.id===id); return {lat:s.lat, lng:s.lng, src:s.src}; }", sid)
+    want_lat, want_lng = to_lat(ty - box["y"]), to_lng(tx - box["x"])
+    ok("the pin actually moved", after["lat"] != before["lat"] or after["lng"] != before["lng"], after)
+    # 1e-7 degrees is about a centimetre: tight enough that a one-pixel projection
+    # error fails this, which is the whole point of correcting a pin by hand.
+    ok("it landed where the mouse was released, not somewhere else",
+       abs(after["lat"] - want_lat) < 1e-7 and abs(after["lng"] - want_lng) < 1e-7,
+       f"got={after} want=({want_lat:.7f}, {want_lng:.7f})")
+    ok("the drag marked the store as manually placed", after["src"] == "manual", after)
+
+    counted = page.evaluate("stores.filter(s => s.src === 'manual').length")
+    ok("exactly one store is marked manual, not all of them", counted == 1, counted)
+    ok("the sidebar reports the adjusted count", "1 store adjusted" in page.text_content("#manualNote"),
+       page.text_content("#manualNote"))
+
+    # Select the store we just moved, so the "adjusted" badge is exercised in the
+    # list (and visible in the screenshot) rather than only in the data.
+    page.click("#drawBtn")
+    for dx, dy in [(-70, -70), (70, -70), (70, 70), (-70, 70)]:
+        page.mouse.click(tx + dx, ty + dy)
+    page.click("#drawBtn")
+    # A drag fires a click of its own on release, which the map has to swallow so it
+    # does not become a stray vertex. Swallowing one click too many is the same bug
+    # in the other direction: the first vertex after any drag goes missing, and the
+    # user just sees a click that did nothing.
+    ok("the first polygon vertex after a drag is not swallowed",
+       len(page.evaluate("polygon")) == 4, page.evaluate("polygon.length"))
+    ok("the adjusted store shows an 'adjusted' badge in the list",
+       page.query_selector("#selList .badge") is not None,
+       page.inner_html("#selList")[:200])
+    page.eval_on_selector("aside.left", "e => e.scrollTop = e.scrollHeight")
+    shot("8-pin-dragged.png")
+    page.click("#clearBtn")
+
+    # Undo. A drag is a mouse gesture with no confirmation step, so an accidental one
+    # must be reversible - otherwise correcting pins by hand is a one-way door.
+    ok("an undo button appears after a move", page.is_visible("#undoBtn"))
+    page.click("#undoBtn")
+    restored = page.evaluate("id => { const s = stores.find(x=>x.id===id); return {lat:s.lat, lng:s.lng, src:s.src}; }", sid)
+    ok("undo puts the pin back exactly where it was",
+       restored["lat"] == before["lat"] and restored["lng"] == before["lng"], restored)
+    ok("undo also clears the manual flag", restored["src"] == "geocoded", restored)
+    ok("the undo button goes away once used", not page.is_visible("#undoBtn"))
+
+    # While the polygon tool is armed, press-and-drag means "draw", so pins must not
+    # move. Both gestures are a mousedown on the map; getting this wrong would yank a
+    # store across the city every time someone drew a polygon over it.
+    page.click("#drawBtn")
+    pin2 = page.query_selector("#offline svg circle.pin[data-sid]")
+    sid2 = int(pin2.get_attribute("data-sid"))
+    pre = page.evaluate("id => { const s = stores.find(x=>x.id===id); return {lat:s.lat, lng:s.lng}; }", sid2)
+    pb2 = pin2.bounding_box()
+    page.mouse.move(pb2["x"] + pb2["width"] / 2, pb2["y"] + pb2["height"] / 2)
+    page.mouse.down()
+    page.mouse.move(box["x"] + box["width"] * 0.85, box["y"] + box["height"] * 0.85, steps=8)
+    page.mouse.up()
+    post = page.evaluate("id => { const s = stores.find(x=>x.id===id); return {lat:s.lat, lng:s.lng}; }", sid2)
+    ok("dragging is disabled while the polygon tool is active",
+       post["lat"] == pre["lat"] and post["lng"] == pre["lng"], f"pre={pre} post={post}")
+    page.click("#drawBtn")
+    page.click("#clearBtn")
+
     # ---------- real scale: 2,000 stores ----------
     # The client's database holds ~2,000 stores in 3 categories. Everything above
     # runs on 24. This section measures the real thing rather than assuming it scales.

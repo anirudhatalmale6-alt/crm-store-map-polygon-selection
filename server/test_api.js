@@ -39,8 +39,11 @@ const SEED = [
   await db.query('ALTER TABLE stores AUTO_INCREMENT = 1');
   for (const [name, category, lat, lng, address] of SEED) {
     await db.query(
-      'INSERT INTO stores (name, category, address, latitude, longitude, geocoded_at) VALUES (?,?,?,?,?,?)',
-      [name, category, address, lat, lng, lat === null ? null : new Date('2026-01-01T00:00:00Z')]
+      `INSERT INTO stores (name, category, address, latitude, longitude,
+                           geocoded_at, location_source) VALUES (?,?,?,?,?,?,?)`,
+      [name, category, address, lat, lng,
+       lat === null ? null : new Date('2026-01-01T00:00:00Z'),
+       lat === null ? null : 'geocoded']
     );
   }
 
@@ -130,10 +133,16 @@ const SEED = [
   console.log('\nPATCH /api/stores/:id/location');
   r = await send('PATCH', '/1/location', { lat: 40.5, lng: -3.5 });
   ok('valid update returns 200', r.status === 200);
-  const moved = (await db.query('SELECT latitude, longitude, geocoded_at FROM stores WHERE id=1'))[0];
+  const moved = (await db.query(
+    'SELECT latitude, longitude, geocoded_at, location_source FROM stores WHERE id=1'))[0];
   ok('coordinates were actually written to MySQL',
      Number(moved.latitude) === 40.5 && Number(moved.longitude) === -3.5, moved);
-  ok('geocoded_at was stamped', moved.geocoded_at !== null);
+  ok('the pin is marked as manually placed', moved.location_source === 'manual', moved);
+  // geocoded_at answers "when did Google last run", so a hand drag must not touch
+  // it - otherwise a hand-placed pin is indistinguishable from a machine-placed one.
+  ok('geocoded_at is left at its original value',
+     moved.geocoded_at instanceof Date && moved.geocoded_at.getUTCFullYear() === 2026
+       && moved.geocoded_at.getUTCMonth() === 0, moved.geocoded_at);
   ok('lat above 90 is rejected', (await send('PATCH', '/1/location', { lat: 91, lng: 0 })).status === 400);
   ok('non-numeric lng is rejected', (await send('PATCH', '/1/location', { lat: 40, lng: 'x' })).status === 400);
   ok('unknown id is a 404', (await send('PATCH', '/99999/location', { lat: 40, lng: -3 })).status === 404);
@@ -160,6 +169,53 @@ const SEED = [
   r = await send('POST', '/8/geocode');           // "No address at all"
   ok('store with no address is a 422', r.status === 422, r);
   ok('unknown id is a 404', (await send('POST', '/99999/geocode')).status === 404);
+
+  /* Manual corrections vs re-geocoding.
+     Geocoding is never perfect, so people will drag pins. The failure that costs
+     real money is not a bad geocode - it is a bulk re-geocode silently undoing
+     hundreds of corrections that were made on purpose. These assertions are the
+     ones standing between that and the client's data. */
+  console.log('\nmanual corrections survive re-geocoding');
+  // Store 5 (Legazpi) has a real address the mock geocoder deliberately cannot
+  // resolve, so if the guard failed we would also see the damage as a 422.
+  await send('PATCH', '/5/location', { lat: 40.1111, lng: -3.2222 });
+  geocodeCalls = 0;
+
+  r = await send('POST', '/5/geocode?force=1');
+  ok('force=1 does NOT overwrite a hand-placed pin', r.body.skipped === 'manual', r.body);
+  ok('...and Google was never called for it', geocodeCalls === 0, geocodeCalls);
+  let kept = (await db.query(
+    'SELECT latitude, longitude, location_source FROM stores WHERE id=5'))[0];
+  ok('the corrected coordinates are still in the database',
+     Number(kept.latitude) === 40.1111 && Number(kept.longitude) === -3.2222, kept);
+  ok('and it is still marked manual', kept.location_source === 'manual', kept);
+
+  // Control positive: the guard must be the reason nothing happened, not a broken
+  // endpoint. The same call with the explicit override has to actually do the work.
+  r = await send('POST', '/7/geocode?force=1');
+  ok('control positive: force=1 still re-geocodes a machine-placed pin',
+     geocodeCalls === 1 && r.body.skipped === undefined, { geocodeCalls, body: r.body });
+
+  r = await send('POST', '/5/geocode?force=1&override_manual=1');
+  ok('override_manual=1 is allowed to overwrite it', geocodeCalls === 2, geocodeCalls);
+  ok('overriding with an unresolvable address is a 422, not a silent wipe',
+     r.status === 422, r);
+  kept = (await db.query(
+    'SELECT latitude, longitude, location_source FROM stores WHERE id=5'))[0];
+  ok('a failed override leaves the old coordinates intact',
+     Number(kept.latitude) === 40.1111 && kept.location_source === 'manual', kept);
+
+  // And a successful override does flip the source back to 'geocoded'.
+  await send('PATCH', '/7/location', { lat: 1, lng: 1 });
+  r = await send('POST', '/7/geocode?force=1&override_manual=1');
+  const flipped = (await db.query(
+    'SELECT latitude, location_source FROM stores WHERE id=7'))[0];
+  ok('a successful override re-marks the pin as geocoded',
+     flipped.location_source === 'geocoded' && Number(flipped.latitude) === 40.43, flipped);
+
+  r = await get('/?bbox=-4,40,-3,41');
+  ok('locationSource is exposed to the front end so it can show the badge',
+     r.body.stores.every(s => 'locationSource' in s), r.body.stores[0]);
 
   console.log('\nquery plan');
   const plan = await db.query(

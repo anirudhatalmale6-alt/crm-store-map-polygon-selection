@@ -14,7 +14,8 @@
 const express = require('express');
 const { storesInPolygon, polygonBounds, parsePolygon } = require('./geo');
 
-const SELECT_COLS = 'id, name, category, latitude AS lat, longitude AS lng, address';
+const SELECT_COLS =
+  'id, name, category, latitude AS lat, longitude AS lng, address, location_source';
 
 /** rows come back with lat/lng as strings from some drivers; normalise once. */
 function toStore(r) {
@@ -25,6 +26,7 @@ function toStore(r) {
     address: r.address,
     lat: r.lat === null ? null : Number(r.lat),
     lng: r.lng === null ? null : Number(r.lng),
+    locationSource: r.location_source || null,
   };
 }
 
@@ -72,7 +74,10 @@ module.exports = function storeRoutes({ db, geocode }) {
     } catch (e) { next(e); }
   });
 
-  /* PATCH /api/stores/:id/location   body: { lat, lng } */
+  /* PATCH /api/stores/:id/location   body: { lat, lng }
+     This is a person dragging a pin, so it stamps location_source='manual' and
+     leaves geocoded_at alone. geocoded_at answers "when did Google last run";
+     overwriting it here would make a hand-placed pin look machine-placed. */
   router.patch('/:id/location', async (req, res, next) => {
     try {
       const lat = Number(req.body && req.body.lat);
@@ -84,11 +89,12 @@ module.exports = function storeRoutes({ db, geocode }) {
         return res.status(400).json({ error: 'lng must be a number between -180 and 180' });
       }
       const r = await db.query(
-        'UPDATE stores SET latitude = ?, longitude = ?, geocoded_at = NOW() WHERE id = ?',
+        `UPDATE stores SET latitude = ?, longitude = ?, location_source = 'manual'
+          WHERE id = ?`,
         [lat, lng, req.params.id]
       );
       if (r && r.affectedRows === 0) return res.status(404).json({ error: 'store not found' });
-      res.json({ id: req.params.id, lat, lng });
+      res.json({ id: req.params.id, lat, lng, locationSource: 'manual' });
     } catch (e) { next(e); }
   });
 
@@ -105,6 +111,18 @@ module.exports = function storeRoutes({ db, geocode }) {
       const store = toStore(rows[0]);
 
       const force = req.query.force === '1';
+
+      /* A hand-placed pin outranks the geocoder, and force=1 does NOT override it.
+         force=1 means "we have coordinates but re-derive them from the address";
+         it must not also mean "discard the correction someone made on purpose".
+         Running a bulk re-geocode over the whole table is a routine thing to do
+         after cleaning up addresses - if that quietly undid every manual fix, the
+         damage would only show up when somebody drove to the wrong place.
+         Overriding is possible, but you have to ask for it by name. */
+      if (store.locationSource === 'manual' && req.query.override_manual !== '1') {
+        return res.json({ ...store, cached: true, skipped: 'manual' });
+      }
+
       if (!force && store.lat !== null && store.lng !== null) {
         return res.json({ ...store, cached: true });
       }
@@ -114,10 +132,13 @@ module.exports = function storeRoutes({ db, geocode }) {
       if (!hit) return res.status(422).json({ error: 'address could not be geocoded' });
 
       await db.query(
-        'UPDATE stores SET latitude = ?, longitude = ?, geocoded_at = NOW() WHERE id = ?',
+        `UPDATE stores SET latitude = ?, longitude = ?, geocoded_at = NOW(),
+                           location_source = 'geocoded'
+          WHERE id = ?`,
         [hit.lat, hit.lng, store.id]
       );
-      res.json({ ...store, lat: hit.lat, lng: hit.lng, cached: false });
+      res.json({ ...store, lat: hit.lat, lng: hit.lng,
+                 locationSource: 'geocoded', cached: false });
     } catch (e) { next(e); }
   });
 

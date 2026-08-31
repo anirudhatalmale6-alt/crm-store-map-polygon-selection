@@ -21,15 +21,17 @@ The selection engine is identical in both modes; only the tiles change.
    polygon — it appears on the map and joins the selection immediately.
 3. **×** next to any selected store deletes it from the CRM — the marker disappears.
 4. Untick a category — those markers and list rows drop out.
-5. **Export CSV** downloads the current selection.
+5. **Drag a pin** to correct where geocoding put it. It gets a dark centre dot and
+   an **adjusted** badge, and **Undo move** appears in the left panel.
+6. **Export CSV** downloads the current selection.
 
 ## Tests
 
 ```
 node test-selection.js        # 23 assertions on the selection + clustering engines
-python3 test_ui.py            # 30 assertions driving the real browser + screenshots
+python3 test_ui.py            # 45 assertions driving the real browser + screenshots
 node server/test_geocoder.js  # 16 assertions on the geocoder (stubbed fetch, no cost)
-node server/test_api.js       # 32 assertions: real Express + real MySQL + real HTTP
+node server/test_api.js       # 43 assertions: real Express + real MySQL + real HTTP
 ```
 
 `test_ui.py` and `test_api.js` both re-implement point-in-polygon independently and assert
@@ -90,6 +92,39 @@ blamed on the data for weeks.
 mean 1,000 rows of DOM rebuilt on every change, and nobody reads row 700. The panel
 says how many are hidden; Export CSV always writes the full selection.
 
+## Correcting a pin by hand
+
+Geocoding places most addresses correctly and some of them slightly wrong — a
+building entrance on the wrong side of the block, a rural address landing on the
+road rather than the yard. So pins can be corrected: **drag any single pin** and
+it saves to the store. Cluster bubbles are not draggable, because "move these 40
+stores" is not something anyone means; click one to zoom into it instead.
+
+An adjusted pin gets a dark centre dot on the map and an **adjusted** badge in the
+list, and the last move can be undone with one click — a drag is a mouse gesture
+with no confirmation step, so an accidental one has to be reversible.
+
+**The important part is in the database, not the UI.** A hand-placed pin is stored
+with `location_source = 'manual'`, and `POST /api/stores/:id/geocode` refuses to
+touch it:
+
+| call | on a geocoded pin | on a hand-adjusted pin |
+|---|---|---|
+| `POST /:id/geocode` | cached, no Google call | `skipped: 'manual'` |
+| `POST /:id/geocode?force=1` | re-geocodes | `skipped: 'manual'` |
+| `POST /:id/geocode?force=1&override_manual=1` | re-geocodes | re-geocodes |
+
+`force=1` means "we have coordinates, re-derive them from the address". It must not
+*also* mean "discard the correction somebody made on purpose". Running a bulk
+re-geocode over the whole table is a routine thing to do after cleaning up
+addresses — and if that quietly undid every manual fix, nobody would find out
+until a delivery went to the wrong street. Overriding is still possible, but you
+have to ask for it by name.
+
+The API tests cover both directions: that a manual pin survives `force=1`, and the
+control positive that the same call still re-geocodes a machine-placed pin — so
+"nothing happened" can't be mistaken for the guard working.
+
 ## How this maps onto your stack
 
 Your CRM: React + TypeScript front end, Node + Express back end, MySQL, VPS on Hostinger.
@@ -102,7 +137,8 @@ to 1–2 metres and visibly shifts markers.
 
 The `geocoded_at` column matters: it lets us geocode an address **once** and reuse the
 result forever. Geocoding on every page load would put your Google bill on a meter for no
-reason.
+reason. `location_source` is what protects hand-corrected pins from a later bulk
+re-geocode — see "Correcting a pin by hand" above.
 
 ### 2. API endpoints (Express) — `server/stores.routes.js`
 

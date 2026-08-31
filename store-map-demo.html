@@ -68,6 +68,10 @@
   .log div{padding:2px 0;border-bottom:1px solid #232a32}
   .del{background:transparent;border:none;color:#6e7c8a;padding:2px 6px;cursor:pointer;font-size:15px;line-height:1}
   .del:hover{color:#ff6b6b}
+  .badge{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;
+         color:var(--accent);border:1px solid var(--accent);border-radius:99px;
+         padding:0 6px;margin-left:5px;vertical-align:1px}
+  #offline svg .pin{cursor:grab}
   .perfbar{position:absolute;top:14px;right:14px;z-index:5;pointer-events:none;
            font-size:11px;color:var(--muted);background:rgba(15,18,22,.72);
            border:1px solid var(--line);border-radius:99px;padding:4px 11px;
@@ -111,6 +115,16 @@
       </label>
       <p class="hint">2,000 is the real size of your database. Clustering merges nearby
          pins into a numbered bubble &mdash; click one on Google Maps to zoom into it.</p>
+    </div>
+
+    <div class="section">
+      <h2>Adjust a pin by hand</h2>
+      <p class="hint" style="margin-top:0">Geocoding gets most addresses right and some
+         slightly wrong. Drag any single pin on the map to put it where it really is &mdash;
+         it saves to the store and is marked <b>adjusted</b> (the dark centre dot).
+         A re-geocode will never move it back.</p>
+      <button class="ghost" id="undoBtn" style="width:100%;display:none">Undo move</button>
+      <p class="hint" id="manualNote"></p>
     </div>
 
     <div class="section">
@@ -221,7 +235,11 @@ const CATEGORIES = [
 const catById = Object.fromEntries(CATEGORIES.map(c => [c.id, c]));
 
 let nextId = 1;
-const mk = (name, cat, lat, lng) => ({ id: nextId++, name, cat, lat, lng });
+/* `src` mirrors the location_source column: null = never positioned,
+   'geocoded' = Google put it there, 'manual' = a person dragged it and it is
+   protected from being re-geocoded. */
+const mk = (name, cat, lat, lng, src = 'geocoded') =>
+  ({ id: nextId++, name, cat, lat, lng, src });
 
 let stores = [
   mk('Gran Vía 34',        'chain',     40.4203, -3.7058),
@@ -367,7 +385,7 @@ function renderSelection() {
         <div class="store">
           <span class="dot" style="background:${catById[s.cat].color}"></span>
           <span style="flex:1;min-width:0">
-            <b>${s.name}</b>
+            <b>${s.name}</b>${s.src === 'manual' ? '<span class="badge">adjusted</span>' : ''}
             <small>${catById[s.cat].label} &middot; ${s.lat.toFixed(4)}, ${s.lng.toFixed(4)}</small>
           </span>
           <button class="del" data-del="${s.id}" title="Delete from CRM">&times;</button>
@@ -376,6 +394,10 @@ function renderSelection() {
   $('selList').querySelectorAll('[data-del]').forEach(b => {
     b.onclick = () => removeStore(Number(b.dataset.del));
   });
+  const n = manualCount();
+  $('manualNote').textContent = n
+    ? `${n} store${n === 1 ? '' : 's'} adjusted by hand — protected from re-geocoding.`
+    : '';
 }
 
 function log(msg) {
@@ -394,16 +416,53 @@ function removeStore(id) {
   const s = stores.find(x => x.id === id);
   if (!s) return;
   stores = stores.filter(x => x.id !== id);
+  // Drop a pending undo that points at this store, or the button sits there
+  // offering to restore something that no longer exists and quietly does nothing.
+  if (lastMove && lastMove.id === id) { lastMove = null; renderUndo(); }
   log(`- removed "${s.name}"`);
   recompute();
 }
-function moveStore(id, lat, lng) {
+/* A drag is easy to do by accident and there is no "are you sure" on a mouse
+   gesture, so every move keeps the previous position for one-click undo. Without
+   this, correcting pins by hand is a one-way door. */
+let lastMove = null;
+
+/* manual defaults to FALSE. This function serves two callers: a person dragging a
+   pin, and the CRM pushing a lat/long update (sync case 3). Only the first is a
+   human correction. If the CRM's own updates were marked manual they would become
+   permanently exempt from re-geocoding, which is the opposite of what that column
+   is for - so the caller has to say so explicitly. */
+function moveStore(id, lat, lng, { manual = false } = {}) {
   const s = stores.find(x => x.id === id);
   if (!s) return;
+  // Only a hand edit is offered for undo; there is nothing to undo about the CRM
+  // telling us where one of its own stores is.
+  if (manual) lastMove = { id, lat: s.lat, lng: s.lng, src: s.src, name: s.name };
   s.lat = lat; s.lng = lng;
-  log(`~ moved "${s.name}" to ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+  if (manual) s.src = 'manual';
+  log(`${manual ? '~ adjusted' : '~ moved'} "${s.name}" to ${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+  renderUndo();
   recompute();
 }
+
+function undoMove() {
+  if (!lastMove) return;
+  const s = stores.find(x => x.id === lastMove.id);
+  if (s) { s.lat = lastMove.lat; s.lng = lastMove.lng; s.src = lastMove.src; }
+  log(`↺ undid the move of "${lastMove.name}"`);
+  lastMove = null;
+  renderUndo();
+  recompute();
+}
+
+function renderUndo() {
+  const b = $('undoBtn');
+  if (!b) return;
+  b.style.display = lastMove ? 'block' : 'none';
+  b.textContent = lastMove ? `Undo move of "${lastMove.name}"` : 'Undo move';
+}
+
+function manualCount() { return stores.filter(s => s.src === 'manual').length; }
 
 /* ------------------------------------------------------------------ *
  * 4. Map surfaces. Both call recompute(); only rendering differs.
@@ -415,6 +474,8 @@ const OfflineSurface = (() => {
   // Wide enough to hold the full 2,000-store stress set, not just the 24 named ones.
   const B = { minLat: 40.360, maxLat: 40.478, minLng: -3.775, maxLng: -3.625 };
   let W = 800, H = 600;
+  let dragging = null;   // { s, circle } while a pin is being dragged
+  let dragged  = false;  // did the pointer actually move between down and up?
 
   const x = lng => (lng - B.minLng) / (B.maxLng - B.minLng) * W;
   const y = lat => (B.maxLat - lat) / (B.maxLat - B.minLat) * H;
@@ -447,10 +508,15 @@ const OfflineSurface = (() => {
     const marks = groups.map(g => {
       if (g.count === 1) {
         const s = g.items[0], on = selectedIds.has(s.id);
+        // data-sid is what makes the pin draggable: the drag handler looks the
+        // store up by it rather than by hit-testing coordinates.
         return `<g>
-          <circle cx="${g.x}" cy="${g.y}" r="${on ? 9 : 6}"
+          <circle class="pin" data-sid="${s.id}" cx="${g.x}" cy="${g.y}" r="${on ? 9 : 6}"
                   fill="${catById[s.cat].color}" stroke="${on ? '#fff' : '#0f1216'}"
                   stroke-width="${on ? 2.5 : 1.5}" opacity="${on ? 1 : .82}"/>
+          ${s.src === 'manual'
+            ? `<circle class="pin" data-sid="${s.id}" cx="${g.x}" cy="${g.y}" r="2.4"
+                       fill="#0f1216" pointer-events="none"/>` : ''}
           ${on && showLabels ? `<text x="${g.x + 13}" y="${g.y + 4}" fill="#e6ebf1"
                         font-size="11">${s.name}</text>` : ''}
         </g>`;
@@ -480,12 +546,71 @@ const OfflineSurface = (() => {
       ${poly}${marks}
     </svg>`;
 
-    host.querySelector('svg').onclick = e => {
-      if (!drawing) return;
+    const svg = host.querySelector('svg');
+
+    svg.onclick = e => {
+      // Consume the drag flag FIRST, whether or not we are drawing. A drag always
+      // fires a click on mouseup; if that click is left unconsumed because the
+      // polygon tool happened to be off, the flag survives and silently eats the
+      // user's next vertex instead - a click that just does nothing.
+      const wasDrag = dragged;
+      dragged = false;
+      if (!drawing || wasDrag) return;
       const r = host.getBoundingClientRect();
       polygon.push({ lat: toLat(e.clientY - r.top), lng: toLng(e.clientX - r.left) });
       recompute();
     };
+
+    /* Drag a pin to correct its position.
+       Only single pins are draggable - dragging a cluster bubble would be
+       ambiguous (which of the 40 stores did you mean to move?), so bubbles keep
+       their zoom-in behaviour instead. While the polygon tool is active, dragging
+       is off entirely: the two gestures are both "press on the map and move". */
+    svg.onmousedown = e => {
+      if (drawing) return;
+      const sid = e.target && e.target.dataset && e.target.dataset.sid;
+      if (!sid) return;
+      e.preventDefault();
+      const s = stores.find(x => x.id === Number(sid));
+      if (!s) return;
+      const circle = e.target;
+      const r = host.getBoundingClientRect();
+      dragging = { s, circle };
+      dragged = false;
+      svg.style.cursor = 'grabbing';
+    };
+
+    svg.onmousemove = e => {
+      if (!dragging) return;
+      dragged = true;
+      const r = host.getBoundingClientRect();
+      // Move the circle only. Re-running the whole render on every mousemove would
+      // also re-cluster, and the pin would jump between bubbles under the cursor.
+      dragging.circle.setAttribute('cx', e.clientX - r.left);
+      dragging.circle.setAttribute('cy', e.clientY - r.top);
+    };
+
+    const endDrag = e => {
+      if (!dragging) return;
+      const { s } = dragging;
+      dragging = null;
+      svg.style.cursor = '';
+      const moved = dragged;
+      /* The flag has to survive just long enough for the click that follows
+         mouseup, and no longer. It cannot simply be cleared by that click: the drag
+         commits by re-rendering, which detaches the very element the click would
+         have landed on, so sometimes no handler ever sees it. A timeout clears it
+         after the click is dispatched either way - otherwise a stale flag silently
+         eats the user's next polygon vertex. */
+      setTimeout(() => { dragged = false; }, 0);
+      if (!moved) return;                         // a plain click, not a drag
+      const r = host.getBoundingClientRect();
+      moveStore(s.id, toLat(e.clientY - r.top), toLng(e.clientX - r.left), { manual: true });
+    };
+    svg.onmouseup = endDrag;
+    // Releasing outside the map must still commit, or the pin snaps back to a
+    // position the user can no longer see and the edit is silently lost.
+    svg.onmouseleave = endDrag;
   }
 
   return {
@@ -586,25 +711,39 @@ const GoogleSurface = (() => {
       };
       const label = single ? null
         : { text: String(g.count), color: '#0f1216', fontSize: '11px', fontWeight: '700' };
-      const title = single ? s.name
+      const title = single
+        ? s.name + (s.src === 'manual' ? ' · position adjusted by hand' : ' · drag to adjust')
         : `${g.count} stores${selIn ? ` · ${selIn} selected` : ''}`;
+
+      // Single pins can be dragged to correct their position; cluster bubbles
+      // cannot, because "move these 40 stores" is not a thing anyone means.
+      // Dragging is also off while the polygon tool is armed, so a pin cannot be
+      // yanked across the map when the user meant to draw a corner.
+      const canDrag = single && !drawing;
 
       let m = markers.get(key);
       if (!m) {
-        m = new google.maps.Marker({ map, position: pos, title, icon, label });
-        // Clicking a cluster zooms into it, which is how you get from 2,000
-        // pins down to the individual store without a scrolling list.
-        if (!single) m.addListener('click', () => {
-          const b = new google.maps.LatLngBounds();
-          g.items.forEach(i => b.extend({ lat: i.lat, lng: i.lng }));
-          map.fitBounds(b, 48);
-        });
+        m = new google.maps.Marker({ map, position: pos, title, icon, label,
+                                     draggable: canDrag });
+        if (single) {
+          m.addListener('dragend', ev =>
+            moveStore(s.id, ev.latLng.lat(), ev.latLng.lng(), { manual: true }));
+        } else {
+          // Clicking a cluster zooms into it, which is how you get from 2,000
+          // pins down to the individual store without a scrolling list.
+          m.addListener('click', () => {
+            const b = new google.maps.LatLngBounds();
+            g.items.forEach(i => b.extend({ lat: i.lat, lng: i.lng }));
+            map.fitBounds(b, 48);
+          });
+        }
         markers.set(key, m);
       } else {
         m.setPosition(pos);        // handles the lat/long-updated case
         m.setIcon(icon);
         m.setLabel(label);
         m.setTitle(title);
+        m.setDraggable(canDrag);
       }
     });
   }
@@ -641,6 +780,7 @@ $('drawBtn').onclick = () => {
 $('clearBtn').onclick = () => { surface.clear(); $('drawBtn').textContent = 'Draw polygon'; };
 
 $('clusterBox').onchange = e => { clustering = e.target.checked; recompute(); };
+$('undoBtn').onclick = undoMove;
 
 $('bulkBtn').onclick = () => {
   if (stores.length > 500) return;

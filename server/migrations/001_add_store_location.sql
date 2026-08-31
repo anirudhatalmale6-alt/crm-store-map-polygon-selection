@@ -9,7 +9,9 @@
 ALTER TABLE stores
   ADD COLUMN latitude    DOUBLE   NULL COMMENT 'WGS84, -90..90',
   ADD COLUMN longitude   DOUBLE   NULL COMMENT 'WGS84, -180..180',
-  ADD COLUMN geocoded_at DATETIME NULL COMMENT 'when lat/lng was last derived from the address';
+  ADD COLUMN geocoded_at DATETIME NULL COMMENT 'when lat/lng was last derived from the address',
+  ADD COLUMN location_source ENUM('geocoded','manual') NULL
+      COMMENT 'manual = a person dragged this pin; geocoding must not overwrite it';
 
 -- Composite index so the bounding-box prefilter in POST /api/stores/in-polygon
 -- is an index range scan instead of a full table scan.
@@ -25,6 +27,14 @@ CREATE INDEX stores_latlng_idx ON stores (latitude, longitude);
 -- the same selection code running in Node, in the browser, and in the database
 -- later if you ever move to PostGIS. Easy to switch if you outgrow it.
 
+-- `location_source` exists because geocoding is never perfect and someone will
+-- correct pins by hand.  Without this column a later bulk re-geocode -- exactly the
+-- thing you run after cleaning up addresses -- silently overwrites every manual
+-- correction, and nobody finds out until a driver is sent to the wrong street.
+-- NULL means "never positioned", 'geocoded' means Google put it there, 'manual'
+-- means a person did and it is protected.
+
 -- Rollback:
 --   DROP INDEX stores_latlng_idx ON stores;
---   ALTER TABLE stores DROP COLUMN latitude, DROP COLUMN longitude, DROP COLUMN geocoded_at;
+--   ALTER TABLE stores DROP COLUMN latitude, DROP COLUMN longitude,
+--                      DROP COLUMN geocoded_at, DROP COLUMN location_source;
