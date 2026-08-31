@@ -69,6 +69,9 @@
   .del{background:transparent;border:none;color:#6e7c8a;padding:2px 6px;cursor:pointer;font-size:15px;line-height:1}
   .del:hover{color:#ff6b6b}
   .badge.warn{color:#ffb454;border-color:#ffb454}
+  /* Matches STALE_COLOR in the script: the badge in the list and the ring on the
+     map have to be the same colour or they read as two unrelated problems. */
+  .badge.stale{color:#ff7ad9;border-color:#ff7ad9}
   .badge{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;
          color:var(--accent);border:1px solid var(--accent);border-radius:99px;
          padding:0 6px;margin-left:5px;vertical-align:1px}
@@ -106,6 +109,21 @@
       <button class="primary" id="addStore" style="width:100%">Add store &rarr; map</button>
       <p class="hint">Leave lat/long empty and it drops the store in the centre of the current view &mdash;
          this stands in for the geocoding step (address &rarr; coordinates) in the real CRM.</p>
+    </div>
+
+    <div class="section">
+      <h2>CRM simulator &mdash; edit a store</h2>
+      <div class="field"><span>Store</span><select id="editTarget"></select></div>
+      <div class="field"><span>Name</span><input id="editName" placeholder="Ani India"></div>
+      <button class="ghost" id="renameBtn" style="width:100%">Rename</button>
+      <div class="field" style="margin-top:10px"><span>Address</span><input id="editAddr" placeholder="Calle Nueva 5, Madrid"></div>
+      <button class="ghost" id="addrBtn" style="width:100%">Change address</button>
+      <p class="hint" id="editNote">Renaming a store never moves its pin &mdash; the coordinates
+         belong to the store&rsquo;s id, not its name. Changing its <b>address</b> does matter:
+         the pin stays on the old street and is marked <b>address changed</b> until it is
+         re-geocoded or confirmed by hand.</p>
+      <button class="ghost" id="refreshBtn" style="width:100%">Re-geocode changed addresses</button>
+      <p class="hint" id="staleNote"></p>
     </div>
 
     <div class="section">
@@ -254,11 +272,32 @@ let nextId = 1;
    returned. ROOFTOP means it found the building; APPROXIMATE means it fell back to
    the town. Storing it is what turns "geocoding is imperfect" from a vague worry
    into a short, specific list of pins for someone to fix. */
-const mk = (name, cat, lat, lng, src = 'geocoded', prec = 'ROOFTOP') =>
-  ({ id: nextId++, name, cat, lat, lng, src, prec });
+/* `addr` is the store's address today; `locAddr` mirrors location_address - the
+   address this pin was actually placed for. They are two different things the
+   moment somebody edits an address, and the gap between them is the only way to
+   know that a pin is sitting on a street the store has moved away from. */
+const mk = (name, cat, lat, lng, src = 'geocoded', prec = 'ROOFTOP') => ({
+  id: nextId++, name, cat, lat, lng, src, prec,
+  addr: name + ', Madrid',
+  // A store that has never been positioned has no address on record. "No record"
+  // must not mean "changed", or every store would look stale the day this ships.
+  locAddr: src ? name + ', Madrid' : null,
+});
+
+/* Deliberately NOT one of the three category colours, and not the white used for
+   "selected". An imprecise pin is already drawn as a dashed hollow circle in its own
+   category colour, so a dashed amber ring would be indistinguishable from an
+   imprecise Potential store at a glance. Solid ring, colour of its own. */
+const STALE_COLOR = '#ff7ad9';
 
 const VAGUE = new Set(['APPROXIMATE', 'GEOMETRIC_CENTER']);
-const needsReview = s => s.src === 'geocoded' && VAGUE.has(s.prec);
+/* Google said it was not sure where this one is. */
+const isVague = s => s.src === 'geocoded' && VAGUE.has(s.prec);
+/* The address was edited after the pin was placed, so the pin is on the old street.
+   Renaming a store does NOT do this - only the address matters. */
+const isStale = s => s.locAddr != null && s.addr != null && s.addr !== s.locAddr;
+/* Both are jobs for a person, so both belong on the same short list. */
+const needsReview = s => isVague(s) || isStale(s);
 
 let stores = [
   mk('Gran Vía 34',        'chain',     40.4203, -3.7058),
@@ -412,8 +451,9 @@ function renderSelection() {
         <div class="store">
           <span class="dot" style="background:${catById[s.cat].color}"></span>
           <span style="flex:1;min-width:0">
-            <b>${s.name}</b>${s.src === 'manual' ? '<span class="badge">adjusted</span>' : ''}${needsReview(s) ? '<span class="badge warn">check</span>' : ''}
+            <b>${s.name}</b>${s.src === 'manual' ? '<span class="badge">adjusted</span>' : ''}${isVague(s) ? '<span class="badge warn">check</span>' : ''}${isStale(s) ? '<span class="badge stale">address changed</span>' : ''}
             <small>${catById[s.cat].label} &middot; ${s.lat.toFixed(4)}, ${s.lng.toFixed(4)}</small>
+            ${isStale(s) ? `<small style="color:${STALE_COLOR}">pin is at &ldquo;${s.locAddr}&rdquo;</small>` : ''}
           </span>
           <button class="del" data-del="${s.id}" title="Delete from CRM">&times;</button>
         </div>`).join('')
@@ -422,10 +462,33 @@ function renderSelection() {
     b.onclick = () => removeStore(Number(b.dataset.del));
   });
   renderReview();
+  renderEditTarget();
   const n = manualCount();
   $('manualNote').textContent = n
     ? `${n} store${n === 1 ? '' : 's'} adjusted by hand — protected from re-geocoding.`
     : '';
+  const st = stores.filter(isStale).length;
+  $('staleNote').textContent = st
+    ? `${st} pin${st === 1 ? ' is' : 's are'} on an address that has since changed.`
+    : '';
+}
+
+const esc = t => String(t).replace(/[&<>"]/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+/* Rebuilt only when the store list or a name actually changes, so it does not throw
+   away whatever the user has picked on every redraw - and capped, because a 2,000
+   entry <select> is not a control anyone can use. */
+let editTargetSig = '';
+function renderEditTarget() {
+  const list = stores.slice(0, 200);
+  const sig = list.map(s => s.id + ':' + s.name).join('|');
+  if (sig === editTargetSig) return;
+  editTargetSig = sig;
+  const sel = $('editTarget');
+  const keep = sel.value;
+  sel.innerHTML = list.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+  if (list.some(s => String(s.id) === keep)) sel.value = keep;
 }
 
 function log(msg) {
@@ -440,6 +503,48 @@ function addStore(s) {
   log(`+ added "${s.name}" (${s.lat.toFixed(4)}, ${s.lng.toFixed(4)})`);
   recompute();
 }
+/* Renaming a store. The pin must not move, and this is the whole reason the
+   coordinates hang off the store's id rather than anything a user can retype. */
+function renameStore(id, name) {
+  const s = stores.find(x => x.id === id);
+  if (!s || !name || name === s.name) return;
+  const was = s.name;
+  s.name = name;
+  log(`~ renamed "${was}" to "${name}" — pin unchanged at ${s.lat.toFixed(4)}, ${s.lng.toFixed(4)}`);
+  recompute();
+}
+
+/* Editing a store's address. The pin deliberately does NOT follow on its own: a
+   silent jump across the city on someone fixing a typo is worse than a pin that is
+   visibly marked as out of date. It goes on the review list instead. */
+function setAddress(id, addr) {
+  const s = stores.find(x => x.id === id);
+  if (!s || !addr || addr === s.addr) return;
+  s.addr = addr;
+  log(`~ "${s.name}" address changed — pin is still at "${s.locAddr}"`);
+  recompute();
+}
+
+/* Stands in for `node server/geocode-batch.js --refresh-changed`. */
+function refreshChanged() {
+  const stale = stores.filter(isStale);
+  if (!stale.length) { log('nothing to re-geocode — no addresses have changed'); return; }
+  let moved = 0, held = 0;
+  for (const s of stale) {
+    /* A hand-placed pin is left alone even here. Only a person can say whether the
+       store actually moved or somebody just tidied up the street name, and the
+       correction they made is not the script's to throw away. */
+    if (s.src === 'manual') { held++; continue; }
+    s.lat = +(s.lat + 0.0035).toFixed(6);   // stand-in for Google's new answer
+    s.lng = +(s.lng + 0.0035).toFixed(6);
+    s.locAddr = s.addr; s.src = 'geocoded'; s.prec = 'ROOFTOP';
+    moved++;
+  }
+  log(`re-geocoded ${moved} changed address${moved === 1 ? '' : 'es'}` +
+      (held ? `; left ${held} hand-placed pin${held === 1 ? '' : 's'} for a person` : ''));
+  recompute();
+}
+
 function removeStore(id) {
   const s = stores.find(x => x.id === id);
   if (!s) return;
@@ -551,8 +656,15 @@ const OfflineSurface = (() => {
         // store up by it rather than by hit-testing coordinates.
         // A pin Google was unsure about is drawn hollow: same colour so you can
         // still read its category, but obviously unfinished.
-        const vague = needsReview(s);
+        const vague = isVague(s);
+        // A pin whose address was edited gets an amber ring: it is not vague, it is
+        // provably on the wrong street until somebody re-geocodes or confirms it.
+        const stale = isStale(s);
         return `<g>
+          ${stale ? `<circle class="ring" data-sid="${s.id}" cx="${g.x}" cy="${g.y}"
+                             r="${on ? 13 : 10}" fill="none" stroke="${STALE_COLOR}"
+                             stroke-width="2" opacity=".95"
+                             pointer-events="none"/>` : ''}
           <circle class="pin" data-sid="${s.id}" cx="${g.x}" cy="${g.y}" r="${on ? 9 : 6}"
                   fill="${vague ? 'none' : catById[s.cat].color}"
                   stroke="${vague ? catById[s.cat].color : (on ? '#fff' : '#0f1216')}"
@@ -748,20 +860,27 @@ const GoogleSurface = (() => {
         : { lat: g.items.reduce((a, i) => a + i.lat, 0) / g.count,
             lng: g.items.reduce((a, i) => a + i.lng, 0) / g.count };
 
-      const vague = single && needsReview(s);
+      const vague = single && isVague(s);
+      const stale = single && isStale(s);
       const icon = {
         path: google.maps.SymbolPath.CIRCLE,
         // Hollow = Google was not confident where this one is. Same colour, so the
         // category is still readable.
         fillColor: colour, fillOpacity: vague ? 0 : 1,
-        strokeColor: vague ? colour : (selIn ? '#ffffff' : '#0f1216'),
-        strokeWeight: vague ? 2.5 : (selIn ? 3 : 1.5),
+        /* Amber outline = the address was edited after this pin was placed, so the
+           pin is provably on the old street. It outranks the white "selected" ring:
+           being in the current selection is something the user already knows, being
+           on the wrong street is not. */
+        strokeColor: stale ? STALE_COLOR : (vague ? colour : (selIn ? '#ffffff' : '#0f1216')),
+        strokeWeight: stale ? 4 : (vague ? 2.5 : (selIn ? 3 : 1.5)),
         scale: single ? (selIn ? 9 : 6) : Math.min(22, 10 + Math.log2(g.count) * 3),
       };
       const label = single ? null
         : { text: String(g.count), color: '#0f1216', fontSize: '11px', fontWeight: '700' };
       const title = single
-        ? s.name + (s.src === 'manual' ? ' · position adjusted by hand' : ' · drag to adjust')
+        ? s.name +
+          (stale ? ` · address changed to "${s.addr}" — this pin is still at "${s.locAddr}"` : '') +
+          (s.src === 'manual' ? ' · position adjusted by hand' : ' · drag to adjust')
         : `${g.count} stores${selIn ? ` · ${selIn} selected` : ''}`;
 
       // Single pins can be dragged to correct their position; cluster bubbles
@@ -839,6 +958,17 @@ $('bulkBtn').onclick = () => {
   log(`+ loaded ${extra.length} stores (${stores.length} total)`);
   recompute();
 };
+
+const editTargetId = () => Number($('editTarget').value);
+$('renameBtn').onclick = () => {
+  const name = $('editName').value.trim();
+  if (name) { renameStore(editTargetId(), name); $('editName').value = ''; }
+};
+$('addrBtn').onclick = () => {
+  const addr = $('editAddr').value.trim();
+  if (addr) { setAddress(editTargetId(), addr); $('editAddr').value = ''; }
+};
+$('refreshBtn').onclick = refreshChanged;
 
 $('nCat').innerHTML = CATEGORIES.map(c => `<option value="${c.id}">${c.label}</option>`).join('');
 $('addStore').onclick = () => {

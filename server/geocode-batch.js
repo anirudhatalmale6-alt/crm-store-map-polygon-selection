@@ -10,23 +10,27 @@
  * carries on. Nothing is lost and nothing is paid for twice.
  *
  * Flags:
- *   --limit N       hard cap on Google calls this run (default 100)
- *   --dry-run       count and list, call nobody, spend nothing
- *   --retry-failed  also retry addresses that were tried and came back empty
- *                   (use this after correcting bad addresses)
- *   --force         also redo rows that already have coordinates
- *   --qps N         requests per second (default 10; Google's default cap is 50)
+ *   --limit N          hard cap on Google calls this run (default 100)
+ *   --dry-run          count and list, call nobody, spend nothing
+ *   --retry-failed     also retry addresses that were tried and came back empty
+ *                      (use this after correcting bad addresses)
+ *   --refresh-changed  also redo rows whose ADDRESS was edited after the pin was
+ *                      placed - the pin is sitting on the old street
+ *   --force            also redo rows that already have coordinates
+ *   --qps N            requests per second (default 10; Google's default cap is 50)
  *
  * Never touches a row whose location_source is 'manual'. See stores.routes.js.
  */
 const makeGeocoder = require('./geocoder');
 const { makeSchema } = require('./schema');
+const { staleSql } = require('./address');
 
 /* The work itself, with the database and the geocoder handed in. Split out from the
  * command line so the tests can drive it against a real MySQL with a stubbed
  * geocoder - a batch job that has never been run against a database is a guess. */
 async function runBatch({ db, geocode, schema = makeSchema(), limit = 100, force = false,
-                          retryFailed = false, dryRun = false, qps = 10, log = console.log }) {
+                          retryFailed = false, refreshChanged = false,
+                          dryRun = false, qps = 10, log = console.log }) {
   const { q, table, selectCols } = schema;
 
   const hasAddress = `${q.address} IS NOT NULL AND ${q.address} <> ''`;
@@ -38,27 +42,43 @@ async function runBatch({ db, geocode, schema = makeSchema(), limit = 100, force
   const notManual = `NOT (${q.source} <=> 'manual')`;
   const noCoords  = `(${q.latitude} IS NULL OR ${q.longitude} IS NULL)`;
 
-  /* Three widening definitions of "needs doing":
-     default      - never even attempted. geocoded_at IS NULL is what makes this
-                    run finite: an address Google cannot resolve gets stamped and
-                    then stops being a candidate. Without that clause the same
-                    unresolvable addresses are paid for again on every single run,
-                    forever, and the script never reports "nothing to do".
-     retryFailed  - attempted but still has no coordinates. This is the one to use
-                    after fixing bad addresses.
-     force        - everything with an address, coordinates or not.
-     All three exclude hand-corrected pins. */
-  const where = force      ? `${hasAddress} AND ${notManual}`
-              : retryFailed ? `${hasAddress} AND ${noCoords} AND ${notManual}`
-              :               `${hasAddress} AND ${noCoords} AND ${q.geocodedAt} IS NULL
-                               AND ${notManual}`;
+  const stale = staleSql(q);
+  /* Never even attempted. geocoded_at IS NULL is what makes this run finite: an
+     address Google cannot resolve gets stamped and then stops being a candidate.
+     Without that clause the same unresolvable addresses are paid for again on
+     every single run, forever, and the script never reports "nothing to do". */
+  const never  = `(${noCoords} AND ${q.geocodedAt} IS NULL)`;
+  /* Attempted but still has no coordinates, plus the ones we tried and could not
+     place. Use after fixing bad addresses. */
+  const failed = `(${noCoords} OR ${q.source} = 'unresolved')`;
+
+  /* Definitions of "needs doing", widened by flag. --refresh-changed adds the
+     rows whose address was edited after the pin was placed; it is opt-in because
+     turning a rename-heavy afternoon in the CRM into a Google bill should be a
+     decision, not a side effect. Every branch excludes hand-corrected pins. */
+  const base = refreshChanged
+    ? `((${retryFailed ? failed : never}) OR ${stale})`
+    : (retryFailed ? failed : never);
+  const where = force ? `${hasAddress} AND ${notManual}`
+                      : `${hasAddress} AND ${notManual} AND ${base}`;
 
   const [{ total }] = await db.query(`SELECT COUNT(*) AS total FROM ${table} WHERE ${where}`, []);
   const [{ manual }] = await db.query(
     `SELECT COUNT(*) AS manual FROM ${table} WHERE ${q.source} = 'manual'`, []);
+  /* Hand-placed pins whose address has since been edited. The script deliberately
+     will not touch these - the correction was made for the old address, and only a
+     person can say whether the store moved or the address was just tidied up - so
+     they are reported instead of silently skipped. */
+  const [{ manualStale }] = await db.query(
+    `SELECT COUNT(*) AS manualStale FROM ${table}
+      WHERE ${q.source} = 'manual' AND ${stale}`, []);
 
   log(`${total} store(s) need geocoding${force ? ' (--force: including ones that already have coordinates)' : ''}`);
   log(`${manual} hand-adjusted store(s) will be skipped and left exactly as they are`);
+  if (manualStale) {
+    log(`${manualStale} of those had their address edited after the pin was placed - ` +
+        `they need a person, not this script (GET /api/stores/needs-review)`);
+  }
   if (total > limit) log(`this run will do ${limit} of them (--limit); run it again for the rest`);
 
   const rows = await db.query(
@@ -66,7 +86,7 @@ async function runBatch({ db, geocode, schema = makeSchema(), limit = 100, force
     [Math.min(limit, total)]
   );
 
-  const stats = { total, manual, considered: rows.length, ok: 0, noResult: 0,
+  const stats = { total, manual, manualStale, considered: rows.length, ok: 0, noResult: 0,
                   failed: 0, stoppedEarly: false, byPrecision: {}, failures: [] };
 
   if (dryRun) {
@@ -82,21 +102,27 @@ async function runBatch({ db, geocode, schema = makeSchema(), limit = 100, force
     try {
       const hit = await geocode(row.address);
       if (!hit) {
-        /* A bad address, not a broken run. Stamp geocoded_at so the next run does
-           not pay to ask the same unanswerable question again, but leave lat/lng
-           NULL and location_source NULL so the row still shows up as needing a
-           human. Marking it 'geocoded' would hide it from the review list. */
+        /* A bad address, not a broken run. Record the attempt AGAINST THE ADDRESS
+           THAT FAILED - stamping geocoded_at alone is not enough once addresses can
+           change, because a row edited to an ungeocodable address would stay stale
+           forever and be paid for on every future --refresh-changed run. Leave
+           lat/lng exactly as they are and mark the row 'unresolved', which keeps it
+           on the review list needing a better address rather than a dragged pin.
+           Marking it 'geocoded' would hide it. */
         await db.query(
-          `UPDATE ${table} SET ${q.geocodedAt} = NOW() WHERE ${q.id} = ?`, [row.id]);
+          `UPDATE ${table} SET ${q.geocodedAt} = NOW(), ${q.source} = 'unresolved',
+                               ${q.precision} = NULL, ${q.locationAddress} = ?
+            WHERE ${q.id} = ?`, [row.address, row.id]);
         stats.noResult++;
         stats.failures.push({ id: row.id, address: row.address, why: 'no result' });
         continue;
       }
       await db.query(
         `UPDATE ${table} SET ${q.latitude} = ?, ${q.longitude} = ?, ${q.geocodedAt} = NOW(),
-                             ${q.source} = 'geocoded', ${q.precision} = ?
+                             ${q.source} = 'geocoded', ${q.precision} = ?,
+                             ${q.locationAddress} = ?
           WHERE ${q.id} = ?`,
-        [hit.lat, hit.lng, hit.precision || null, row.id]
+        [hit.lat, hit.lng, hit.precision || null, row.address, row.id]
       );
       stats.ok++;
       const p = hit.precision || 'UNKNOWN';
@@ -136,6 +162,7 @@ if (require.main === module) {
   const dryRun = process.argv.includes('--dry-run');
   const force  = process.argv.includes('--force');
   const retryFailed = process.argv.includes('--retry-failed');
+  const refreshChanged = process.argv.includes('--refresh-changed');
   const limit  = Number(arg('limit', 100));
   const qps    = Number(arg('qps', 10));
 
@@ -169,7 +196,8 @@ if (require.main === module) {
       region: process.env.GEOCODE_REGION || undefined,
     });
 
-    const stats = await runBatch({ db, geocode, limit, force, retryFailed, dryRun, qps });
+    const stats = await runBatch({ db, geocode, limit, force, retryFailed,
+                                   refreshChanged, dryRun, qps });
 
     if (!dryRun) {
       console.log(`\ngeocoded ${stats.ok} · no result ${stats.noResult} · errors ${stats.failed}`);

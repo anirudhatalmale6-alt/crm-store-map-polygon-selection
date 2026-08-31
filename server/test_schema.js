@@ -82,7 +82,45 @@ ok('control positive: the validator is not a no-op',
 
 ok('DEFAULTS lists every name the routes need',
    ['table', 'id', 'name', 'category', 'address', 'latitude', 'longitude',
-    'geocodedAt', 'source', 'precision'].every(k => k in DEFAULTS), Object.keys(DEFAULTS));
+    'geocodedAt', 'source', 'precision', 'locationAddress'].every(k => k in DEFAULTS),
+   Object.keys(DEFAULTS));
+ok('a renamed location_address column is wired through the SELECT list',
+   makeSchema({ locationAddress: 'direccion_geo' }, {}).selectCols
+     .includes('`direccion_geo` AS location_address'),
+   makeSchema({ locationAddress: 'direccion_geo' }, {}).selectCols);
+ok('...and it is validated like every other name',
+   throws(() => makeSchema({ locationAddress: 'x`, (SELECT 1) AS y, `z' }, {})));
+
+/* The checked-in .sql must be what the generator produces right now.
+ *
+ * This is here because it already caught me: I changed a column definition in
+ * print-migration.js, and the migration file on disk - the thing that actually gets
+ * run against the database - stayed as it was. Everything still passed, because the
+ * tests build their tables from the OLD file, so the suite and the database agreed
+ * with each other and both disagreed with the code. The failure would have shown up
+ * on the client's server. */
+console.log('\nthe migration on disk matches the generator');
+const { execFileSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const run = (...args) => execFileSync(process.execPath,
+  [path.join(__dirname, 'print-migration.js'), ...args], { encoding: 'utf8' });
+const rollback = run('--rollback').replace(/\n$/, '').split('\n').map(l => '-- ' + l).join('\n');
+const expected = (run() + rollback).trimEnd();
+const onDisk = fs.readFileSync(
+  path.join(__dirname, 'migrations', '001_add_store_location.sql'), 'utf8').trimEnd();
+ok('001_add_store_location.sql is exactly what schema.js generates today',
+   onDisk === expected,
+   onDisk === expected ? '' : 'regenerate it: node server/print-migration.js > ' +
+     'server/migrations/001_add_store_location.sql && node server/print-migration.js ' +
+     "--rollback | sed 's/^/-- /' >> server/migrations/001_add_store_location.sql");
+// Control positive: an assertion comparing two empty strings would also pass.
+ok('control positive: the migration is not empty and does add the columns',
+   onDisk.includes('ADD COLUMN `location_address`') && onDisk.length > 500, onDisk.length);
+ok('the rollback is commented out, so running the file cannot undo it',
+   onDisk.split('\n').filter(l => /DROP (COLUMN|INDEX)/.test(l))
+         .every(l => l.trim().startsWith('--')),
+   onDisk.split('\n').filter(l => /DROP (COLUMN|INDEX)/.test(l)));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

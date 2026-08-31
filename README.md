@@ -25,17 +25,21 @@ The selection engine is identical in both modes; only the tiles change.
    an **adjusted** badge, and **Undo move** appears in the left panel.
 6. **Pins worth checking** filters to the ones Google placed imprecisely — the
    short list actually worth a person's time.
-7. **Export CSV** downloads the current selection.
+7. **Rename** a store in the second CRM panel — the pin does not move.
+   Then **Change address** on the same store: the pin stays put and gets a pink
+   ring and an **address changed** badge. **Re-geocode changed addresses**
+   resolves them, except the hand-placed ones.
+8. **Export CSV** downloads the current selection.
 
 ## Tests
 
 ```
 node test-selection.js        # 23 assertions on the selection + clustering engines
-python3 test_ui.py            # 54 assertions driving the real browser + screenshots
-node server/test_schema.js    # 33 assertions on the table/column config (no database)
+python3 test_ui.py            # 75 assertions driving the real browser + screenshots
+node server/test_schema.js    # 38 assertions on the table/column config (no database)
 node server/test_geocoder.js  # 16 assertions on the geocoder (stubbed fetch, no cost)
-node server/test_api.js       # 60 assertions: real Express + real MySQL + real HTTP
-node server/test_batch.js     # 39 assertions on the bulk geocoding run (real MySQL)
+node server/test_api.js       # 89 assertions: real Express + real MySQL + real HTTP
+node server/test_batch.js     # 53 assertions on the bulk geocoding run (real MySQL)
 ```
 
 `test_ui.py` and `test_api.js` both re-implement point-in-polygon independently and assert
@@ -112,11 +116,11 @@ with no confirmation step, so an accidental one has to be reversible.
 with `location_source = 'manual'`, and `POST /api/stores/:id/geocode` refuses to
 touch it:
 
-| call | on a geocoded pin | on a hand-adjusted pin |
-|---|---|---|
-| `POST /:id/geocode` | cached, no Google call | `skipped: 'manual'` |
-| `POST /:id/geocode?force=1` | re-geocodes | `skipped: 'manual'` |
-| `POST /:id/geocode?force=1&override_manual=1` | re-geocodes | re-geocodes |
+| call | on a geocoded pin | on a stale geocoded pin | on a hand-adjusted pin |
+|---|---|---|---|
+| `POST /:id/geocode` | cached, no Google call | re-geocodes | `skipped: 'manual'` |
+| `POST /:id/geocode?force=1` | re-geocodes | re-geocodes | `skipped: 'manual'` |
+| `POST /:id/geocode?force=1&override_manual=1` | re-geocodes | re-geocodes | re-geocodes |
 
 `force=1` means "we have coordinates, re-derive them from the address". It must not
 *also* mean "discard the correction somebody made on purpose". Running a bulk
@@ -128,6 +132,59 @@ have to ask for it by name.
 The API tests cover both directions: that a manual pin survives `force=1`, and the
 control positive that the same call still re-geocodes a machine-placed pin — so
 "nothing happened" can't be mistaken for the guard working.
+
+## Renaming a store, and changing its address
+
+**Renaming a store does nothing to its pin.** The coordinates live on the store's
+row and belong to its id, not to its name — rename it, change its category, change
+its phone number, and the same pin stays exactly where it was, keeps its place in
+any polygon selection, and keeps its marker on the map rather than being torn down
+and rebuilt. Only `latitude` and `longitude` decide where a pin sits.
+
+**Editing the address is the case that matters.** The pin does not follow the edit,
+so without anything else it silently stays on the old street — and a wrong pin that
+looks correct is worse than an obviously missing one.
+
+So `location_address` records the address a pin was actually placed for, by Google
+or by a person. When it stops matching the `address` column, that store is *stale*:
+it gets a pink ring on the map, an **address changed** badge in the list, and a place
+on `GET /api/stores/needs-review`.
+
+| | |
+|---|---|
+| `location_address` is NULL | **not** stale — see below |
+| matches `address` | not stale |
+| differs from `address` | stale: the pin is on the old street |
+
+The NULL row is the important one. Every store that existed before this column did
+has `location_address` NULL, and "we never recorded it" must not be read as "it
+changed" — otherwise switching this on marks all 2,000 stores stale and, on the
+next bulk run, re-geocodes the entire table. Unknown is not the same as changed.
+
+What happens next is a decision rather than a default:
+
+- `POST /api/stores/:id/geocode` on a stale store **does** re-geocode it. That is
+  not a policy, it is what a cache means: the stored coordinates answer a question
+  about a different address, so there is nothing to serve.
+- The bulk run leaves stale stores alone unless you pass `--refresh-changed`. An
+  afternoon of tidying up addresses in the CRM should not turn into a Google bill
+  as a side effect.
+- A **hand-placed pin is never moved automatically**, stale or not. Somebody put it
+  there deliberately, and only a person can say whether the store actually moved or
+  the street name was just corrected. The bulk run reports how many of these there
+  are instead of skipping them silently.
+- An edited address that Google cannot resolve is marked `unresolved` against the
+  address that failed, so it stops being asked about on every future run. It stays
+  on the review list — as a bad address needing correction, which is a different job
+  from a vague pin needing a drag.
+
+The comparison rule lives in one file (`server/address.js`) because two things ask
+it: the API in JavaScript, and the bulk geocoder in SQL. MySQL 8's default collation
+is accent-insensitive, so a plain SQL string comparison calls `Gran Vía 34` and
+`Gran Via 34` the same address while JavaScript calls them different — which would
+mean the API reporting a store as stale that the batch never picks up. The SQL casts
+to `BINARY`, and the test suite pushes exactly that accented pair through both paths
+and asserts they agree.
 
 ## Your table is not called `stores`
 
@@ -177,6 +234,8 @@ node server/geocode-batch.js --limit 2000
 - **An address Google can't resolve is stamped and then left alone**, so it is not
   paid for again on every future run. `--retry-failed` picks those back up once
   you have corrected the addresses.
+- **`--refresh-changed` re-geocodes stores whose address was edited** after the pin
+  was placed. Off by default, so editing addresses never spends money by itself.
 - **It stops on the first quota or permission error** instead of burning through
   the rest of the batch failing identically.
 - **It never touches a hand-corrected pin.**
@@ -207,7 +266,17 @@ to 1–2 metres and visibly shifts markers.
 The `geocoded_at` column matters: it lets us geocode an address **once** and reuse the
 result forever. Geocoding on every page load would put your Google bill on a meter for no
 reason. `location_source` is what protects hand-corrected pins from a later bulk
-re-geocode — see "Correcting a pin by hand" above.
+re-geocode — see "Correcting a pin by hand" above. `location_address` is what makes
+"somebody edited the address and the pin stayed behind" detectable instead of
+invisible — see "Renaming a store, and changing its address".
+
+`server/print-migration.js` generates this file, and `test_schema.js` asserts that
+the checked-in `.sql` is exactly what the generator produces today. That check is
+there because it has already caught a real mistake: a column definition changed in
+the generator while the `.sql` on disk — the thing that actually runs against your
+database — stayed as it was. Every test still passed, because the test databases are
+built from the same stale file, so the suite and the database agreed with each other
+and both disagreed with the code.
 
 ### 2. API endpoints (Express) — `server/stores.routes.js`
 
@@ -217,7 +286,13 @@ re-geocode — see "Correcting a pin by hand" above.
 | `PATCH`| `/api/stores/:id/location` | save corrected coordinates |
 | `POST` | `/api/stores/:id/geocode` | address → lat/lng, cached in `geocoded_at` |
 | `POST` | `/api/stores/in-polygon` | body: polygon vertices → the stores inside |
-| `GET`  | `/api/stores/needs-review` | the pins Google itself was unsure about |
+| `GET`  | `/api/stores/needs-review` | the pins worth a person's time, worst first |
+
+`needs-review` splits its answer into four counts — `stale`, `unlocated`,
+`unresolved`, `imprecise` — assigned by priority so they are disjoint and add up to
+`count`. A store can easily be both stale and imprecise; counting it in both buckets
+would give four numbers that don't sum to the fifth, which reads as a broken report
+rather than one store with two problems. The test suite asserts the sum.
 
 The router takes a `db` with `query(sql, params)` — exactly what `mysql2/promise` gives you:
 

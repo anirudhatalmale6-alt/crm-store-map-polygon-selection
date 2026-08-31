@@ -16,12 +16,16 @@ const DEFAULTS = {
   name:        'name',
   category:    'category',
   address:     'address',
-  // These four are added by migration 001 and are ours to name.
+  // These are added by migration 001 and are ours to name.
   latitude:    'latitude',
   longitude:   'longitude',
   geocodedAt:  'geocoded_at',
   source:      'location_source',
   precision:   'location_precision',
+  // The address the pin was actually placed for. Renaming a store never moves its
+  // pin, but editing its ADDRESS should — and without this column there is no way
+  // to tell that a pin is now sitting on a street the store has moved away from.
+  locationAddress: 'location_address',
 };
 
 /* Identifiers cannot be passed as query parameters — `SELECT ? FROM ?` is not a
@@ -56,6 +60,7 @@ function makeSchema(overrides = {}, env = process.env) {
     geocodedAt: env.STORES_GEOCODED_AT_COL,
     source:     env.STORES_SOURCE_COL,
     precision:  env.STORES_PRECISION_COL,
+    locationAddress: env.STORES_LOCATION_ADDRESS_COL,
   };
 
   const names = { ...DEFAULTS };
@@ -81,6 +86,7 @@ function makeSchema(overrides = {}, env = process.env) {
     `${q.address} AS address`,
     `${q.source} AS location_source`,
     `${q.precision} AS location_precision`,
+    `${q.locationAddress} AS location_address`,
   ].join(', ');
 
   return { names, q, table: q.table, selectCols, indexName: 'stores_latlng_idx' };

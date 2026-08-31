@@ -129,10 +129,12 @@ with sync_playwright() as p:
        page.text_content("#reviewCount") == str(len(flagged)),
        f'ui={page.text_content("#reviewCount")} data={len(flagged)}')
     ok("only imprecise geocodes are flagged",
-       page.evaluate("stores.filter(needsReview)"
+       page.evaluate("stores.filter(isVague)"
                      ".every(s => ['APPROXIMATE','GEOMETRIC_CENTER'].includes(s.prec))"))
     ok("precise pins are not flagged",
        page.evaluate("stores.filter(s => s.prec === 'ROOFTOP').every(s => !needsReview(s))"))
+    ok("nothing is stale yet, so this list is purely about precision",
+       page.evaluate("stores.every(s => !isStale(s))"))
 
     page.check("#reviewBox")
     shown_names = sorted(page.evaluate("visibleStores().map(s => s.name)"))
@@ -252,6 +254,105 @@ with sync_playwright() as p:
     ok("dragging is disabled while the polygon tool is active",
        post["lat"] == pre["lat"] and post["lng"] == pre["lng"], f"pre={pre} post={post}")
     page.click("#drawBtn")
+    page.click("#clearBtn")
+
+    # ---------- renaming a store vs changing its address ----------
+    # The client asked what happens to a pin when a store is renamed. The answer is
+    # "nothing", and it is worth driving rather than asserting: the coordinates hang
+    # off the store's id, not off any text a user can retype. The dangerous sibling
+    # is the ADDRESS edit, where the pin stays on the old street looking correct.
+    print("\nrenaming a store, and changing its address")
+
+    # Draw a selection first, and rename a store that is INSIDE it. Otherwise
+    # "selection membership is unchanged" is only ever comparing False to False.
+    page.click("#drawBtn")
+    for fx, fy in [(0.10, 0.10), (0.90, 0.10), (0.90, 0.90), (0.10, 0.90)]:
+        page.mouse.click(box["x"] + box["width"] * fx, box["y"] + box["height"] * fy)
+    page.click("#drawBtn")
+    # An ISOLATED pin, not just the first selected one. Gran Vía 34 and Callao sit
+    # 60 m apart and overlap on screen, so a screenshot of a ring around one of them
+    # proves nothing about which store it belongs to.
+    target = page.evaluate(
+        "(() => { const s = stores.find(x => x.name === 'Legazpi' && selectedIds.has(x.id));"
+        "         return s ? s.id : [...selectedIds][0]; })()")
+    ok("control positive: the store about to be renamed is inside the selection",
+       target is not None and page.evaluate("id => selectedIds.has(id)", target), target)
+    page.select_option("#editTarget", str(target))
+    read = lambda i: page.evaluate(
+        "id => { const s = stores.find(x=>x.id===id);"
+        "        return {lat:s.lat, lng:s.lng, name:s.name, addr:s.addr,"
+        "                locAddr:s.locAddr, stale:isStale(s), src:s.src}; }", i)
+    before = read(target)
+    # Captured BEFORE the rename. Comparing a live read against another live read
+    # would be a tautology that passes no matter what the rename does.
+    was_selected = page.evaluate("id => selectedIds.has(id)", target)
+
+    page.fill("#editName", "Ani India")
+    page.click("#renameBtn")
+    after = read(target)
+    ok("renaming a store does not move its pin",
+       after["lat"] == before["lat"] and after["lng"] == before["lng"], f"{before} -> {after}")
+    ok("...the rename did take effect (control positive)", after["name"] == "Ani India", after)
+    ok("...and the pin is not marked stale by a rename", after["stale"] is False, after)
+    ok("...and its polygon selection membership is unchanged",
+       page.evaluate("id => selectedIds.has(id)", target) == was_selected,
+       f"was={was_selected} now={page.evaluate('id => selectedIds.has(id)', target)}")
+
+    # The marker on the map must be the same marker, not a torn-down and rebuilt one.
+    same_pin = page.query_selector(f'#offline svg circle.pin[data-sid="{target}"]')
+    ok("...and it still has exactly one pin on the map, under the same id",
+       same_pin is not None and
+       len(page.query_selector_all(f'#offline svg circle.pin[data-sid="{target}"]')) == 1)
+
+    # Now the address.
+    page.fill("#editAddr", "Calle Nueva 5, Madrid")
+    page.click("#addrBtn")
+    moved = read(target)
+    ok("changing the address marks the pin stale", moved["stale"] is True, moved)
+    ok("...but does not move the pin on its own",
+       moved["lat"] == before["lat"] and moved["lng"] == before["lng"], moved)
+    ok("...and the pin still records the address it was actually placed for",
+       moved["locAddr"] == before["addr"], moved)
+    ok("a stale pin gets a ring on the map",
+       len(page.query_selector_all(f'#offline svg circle.ring[data-sid="{target}"]')) == 1)
+    ok("...and the ring is decoration, so it cannot be dragged instead of the pin",
+       page.get_attribute(f'#offline svg circle.ring[data-sid="{target}"]',
+                          "pointer-events") == "none")
+    ok("a stale pin joins the list of pins worth checking",
+       page.evaluate("id => needsReview(stores.find(x=>x.id===id))", target) is True)
+    shot("10-address-changed.png")
+
+    # Re-geocoding the changed ones. This stands in for --refresh-changed.
+    # First make one of them a hand-placed pin, which the run must refuse to touch.
+    hand = page.evaluate("stores.filter(s => s.id !== %d)[0].id" % target)
+    page.evaluate("id => moveStore(id, 40.40, -3.70, {manual:true})", hand)
+    page.select_option("#editTarget", str(hand))
+    page.fill("#editAddr", "Otra Calle 9, Madrid")
+    page.click("#addrBtn")
+    ok("control positive: the hand-placed pin is stale too", read(hand)["stale"] is True, read(hand))
+
+    stale_before = page.evaluate("stores.filter(isStale).length")
+    ok("control positive: there are stale pins to re-geocode", stale_before == 2, stale_before)
+    pre_hand = read(hand)
+    page.click("#refreshBtn")
+    post = read(target)
+    post_hand = read(hand)
+    ok("re-geocoding moves the machine-placed pin to its new address",
+       post["stale"] is False and post["lat"] != before["lat"], post)
+    ok("...and leaves the hand-placed pin exactly where the person put it",
+       post_hand["lat"] == pre_hand["lat"] and post_hand["lng"] == pre_hand["lng"], post_hand)
+    ok("...still marked manual, so it keeps its protection",
+       post_hand["src"] == "manual", post_hand)
+    ok("...and still flagged, because only a person can resolve it",
+       post_hand["stale"] is True, post_hand)
+    ok("the sidebar says how many pins are on a changed address",
+       "1 pin is" in (page.text_content("#staleNote") or ""), page.text_content("#staleNote"))
+
+    # Put the map back the way the scale section expects it.
+    page.evaluate("id => moveStore(id, %f, %f)" % (pre_hand["lat"], pre_hand["lng"]), hand)
+    page.evaluate("stores.forEach(s => { s.addr = s.locAddr || s.addr; }); recompute()")
+    ok("cleanup: nothing is stale going into the scale section",
+       page.evaluate("stores.filter(isStale).length") == 0)
     page.click("#clearBtn")
 
     # ---------- real scale: 2,000 stores ----------

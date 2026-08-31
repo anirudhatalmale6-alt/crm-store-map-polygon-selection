@@ -17,6 +17,7 @@
 const express = require('express');
 const { storesInPolygon, polygonBounds, parsePolygon } = require('./geo');
 const { makeSchema } = require('./schema');
+const { addressIsStale, staleSql } = require('./address');
 
 /** rows come back with lat/lng as strings from some drivers; normalise once. */
 function toStore(r) {
@@ -29,6 +30,10 @@ function toStore(r) {
     lng: r.lng === null ? null : Number(r.lng),
     locationSource: r.location_source || null,
     locationPrecision: r.location_precision || null,
+    // The address this pin was actually placed for, and whether the store has
+    // been given a different one since.
+    locationAddress: r.location_address == null ? null : r.location_address,
+    addressStale: addressIsStale(r.address, r.location_address),
   };
 }
 
@@ -63,21 +68,41 @@ module.exports = function storeRoutes({ db, geocode, schema = makeSchema() }) {
      without this the only way to find them is to stare at 2,000 pins. */
   router.get('/needs-review', async (req, res, next) => {
     try {
+      const stale = staleSql(q);
       const rows = await db.query(
         `SELECT ${selectCols} FROM ${table}
-          WHERE ${q.source} = 'geocoded'
-            AND (${q.precision} IN ('APPROXIMATE', 'GEOMETRIC_CENTER')
-                 OR ${q.latitude} IS NULL)
-          ORDER BY ${q.precision} = 'APPROXIMATE' DESC, ${q.id}`, []
+          WHERE ${stale}
+             OR ${q.source} = 'unresolved'
+             OR (${q.source} = 'geocoded'
+                 AND ${q.precision} IN ('APPROXIMATE', 'GEOMETRIC_CENTER'))
+             OR (${q.latitude} IS NULL AND ${q.geocodedAt} IS NOT NULL)
+          ORDER BY ${stale} DESC,
+                   ${q.precision} = 'APPROXIMATE' DESC,
+                   ${q.id}`, []
       );
       const stores = rows.map(toStore);
+      /* Buckets are assigned by priority, not by test, so that they are disjoint
+         and stale + unlocated + imprecise === count. A store can easily be both
+         stale and imprecise; counting it twice gives three numbers that do not add
+         up to the fourth, which reads as a bug in the report rather than a store
+         with two problems. The test suite asserts the sum. */
+      const bucket = s => s.addressStale                     ? 'stale'
+                        : s.lat === null                     ? 'unlocated'
+                        : s.locationSource === 'unresolved'  ? 'unresolved'
+                        :                                      'imprecise';
+      const count = k => stores.filter(s => bucket(s) === k).length;
       res.json({
         stores,
         count: stores.length,
-        // Split out so the number is actionable: "no coordinates at all" needs a
-        // better address, "approximate" needs someone to drag the pin.
-        unlocated: stores.filter(s => s.lat === null).length,
-        imprecise: stores.filter(s => s.lat !== null).length,
+        /* Each number is a different job:
+           stale      - the address was edited and the pin stayed behind
+           unlocated  - tried, no result, and no pin at all to show
+           unresolved - tried, no result, but there is an older pin still on the map
+           imprecise  - Google placed it but said it was not sure where */
+        stale:      count('stale'),
+        unlocated:  count('unlocated'),
+        unresolved: count('unresolved'),
+        imprecise:  count('imprecise'),
       });
     } catch (e) { next(e); }
   });
@@ -116,9 +141,15 @@ module.exports = function storeRoutes({ db, geocode, schema = makeSchema() }) {
       if (!Number.isFinite(lng) || lng < -180 || lng > 180) {
         return res.status(400).json({ error: 'lng must be a number between -180 and 180' });
       }
+      /* location_address is set from the row's own address column in the same
+         statement — the position a person just chose is a position for the address
+         the store has right now. Reading it first and writing it back would leave a
+         window where an address edit lands in between and the pin gets recorded
+         against an address nobody placed it for. */
       const r = await db.query(
         `UPDATE ${table} SET ${q.latitude} = ?, ${q.longitude} = ?,
-                             ${q.source} = 'manual', ${q.precision} = NULL
+                             ${q.source} = 'manual', ${q.precision} = NULL,
+                             ${q.locationAddress} = ${q.address}
           WHERE ${q.id} = ?`,
         [lat, lng, req.params.id]
       );
@@ -153,23 +184,56 @@ module.exports = function storeRoutes({ db, geocode, schema = makeSchema() }) {
         return res.json({ ...store, cached: true, skipped: 'manual' });
       }
 
-      if (!force && store.lat !== null && store.lng !== null) {
+      /* A cached result is only a cache if it answers the question being asked.
+         These coordinates were derived from whatever address was in the row at the
+         time; if somebody has edited the address since, we do not have the answer
+         for the new one and returning the old pin as `cached: true` is a lie the
+         map has no way to see through. Note this is cache correctness, not a
+         policy about bulk re-geocoding - the bulk run is opt-in, see
+         geocode-batch.js --refresh-changed. */
+      if (!force && store.lat !== null && store.lng !== null && !store.addressStale) {
         return res.json({ ...store, cached: true });
       }
       if (!store.address) return res.status(422).json({ error: 'store has no address to geocode' });
 
       const hit = await geocode(store.address);
-      if (!hit) return res.status(422).json({ error: 'address could not be geocoded' });
+      if (!hit) {
+        /* Record the failed attempt against the address that failed, so the store
+           stops being stale and no future run pays to ask the same unanswerable
+           question. It stays on the review list as 'unresolved', which is a
+           different job from 'imprecise': this one needs a better address, not a
+           dragged pin.
+
+           EXCEPT on a hand-placed pin. Overwriting location_source there would
+           throw away the fact that a person positioned it, and 'manual' is the only
+           thing keeping the bulk geocoder off that row - a failed call would
+           quietly remove the protection that the successful call was refused. A
+           manual pin is left completely untouched; it costs nothing to leave it,
+           because the batch never picks manual rows up on its own. */
+        if (store.locationSource !== 'manual') {
+          await db.query(
+            `UPDATE ${table} SET ${q.geocodedAt} = NOW(), ${q.source} = 'unresolved',
+                                 ${q.precision} = NULL, ${q.locationAddress} = ?
+              WHERE ${q.id} = ?`,
+            [store.address, store.id]
+          );
+        }
+        return res.status(422).json({
+          error: 'address could not be geocoded', id: store.id,
+          locationSource: store.locationSource === 'manual' ? 'manual' : 'unresolved',
+        });
+      }
 
       await db.query(
         `UPDATE ${table} SET ${q.latitude} = ?, ${q.longitude} = ?,
                              ${q.geocodedAt} = NOW(), ${q.source} = 'geocoded',
-                             ${q.precision} = ?
+                             ${q.precision} = ?, ${q.locationAddress} = ?
           WHERE ${q.id} = ?`,
-        [hit.lat, hit.lng, hit.precision || null, store.id]
+        [hit.lat, hit.lng, hit.precision || null, store.address, store.id]
       );
       res.json({ ...store, lat: hit.lat, lng: hit.lng,
                  locationSource: 'geocoded', locationPrecision: hit.precision || null,
+                 locationAddress: store.address, addressStale: false,
                  cached: false });
     } catch (e) { next(e); }
   });

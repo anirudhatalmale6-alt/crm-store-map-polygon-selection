@@ -52,6 +52,11 @@ const SEED = [
   const geocode = async (address) => {
     geocodeCalls++;
     if (address && address.includes('Calle Falsa')) return { lat: 40.4300, lng: -3.7000 };
+    // A store that has been given a new address, so "the pin followed the edit"
+    // can be checked by coordinate rather than by the absence of an error.
+    if (address && address.includes('Nueva Direccion')) {
+      return { lat: 41.0000, lng: -4.0000, precision: 'ROOFTOP' };
+    }
     return null;
   };
 
@@ -242,6 +247,116 @@ const SEED = [
   ok('the worst ones come first', r.body.stores[0].locationPrecision === 'APPROXIMATE', r.body.stores[0]);
   ok('precision is exposed to the front end', r.body.stores.every(s => 'locationPrecision' in s));
 
+  /* ---- when the store record changes underneath the pin ----
+     The client asked what happens to a pin when a store is renamed. Nothing, and
+     that is worth proving rather than saying. The dangerous half is the sibling
+     case: editing the ADDRESS, where the pin silently stays on the old street and
+     nothing in the system knows it is wrong. */
+  console.log('\nwhen the store record changes underneath the pin');
+
+  const one = async (id) => (await get('')).body.stores.find(s => s.id === id);
+
+  const before1 = await one(1);
+  await db.query(`UPDATE stores SET name='Ani India', category='partner' WHERE id=1`);
+  const after1 = await one(1);
+  ok('renaming a store does not move its pin',
+     after1.lat === before1.lat && after1.lng === before1.lng, { before1, after1 });
+  ok('...it is the same store, not a new one', after1.id === before1.id);
+  ok('...the new name is what comes back', after1.name === 'Ani India', after1);
+  ok('...and a rename never marks the pin stale', after1.addressStale === false, after1);
+
+  /* The clause that decides whether switching this feature on re-geocodes the whole
+     table. Every row that existed before the column did has location_address NULL,
+     and NULL must mean "unknown", not "changed". */
+  const unrecorded = (await get('')).body.stores.filter(s => s.locationAddress === null);
+  ok('control positive: the fixture really does contain rows from before this column',
+     unrecorded.length > 0, unrecorded.length);
+  ok('a pin with no recorded address is never stale, so enabling this re-geocodes nothing',
+     unrecorded.every(s => s.addressStale === false), unrecorded.map(s => s.id));
+
+  // An address edit, on a store whose pin we have just recorded an address for.
+  await db.query(`UPDATE stores SET location_address = address WHERE id=2`);
+  let s2 = await one(2);
+  ok('control positive: recording the address a pin was placed for clears staleness',
+     s2.addressStale === false, s2);
+  const pin2 = { lat: s2.lat, lng: s2.lng };
+  await db.query(`UPDATE stores SET address='Nueva Direccion 1, Madrid' WHERE id=2`);
+  s2 = await one(2);
+  ok('editing the address marks the pin stale', s2.addressStale === true, s2);
+  ok('...but does not move the pin by itself', s2.lat === pin2.lat && s2.lng === pin2.lng, s2);
+
+  let calls = geocodeCalls;
+  r = await send('POST', '/2/geocode');
+  ok('a stale pin is NOT served from the cache - the cache does not have this answer',
+     geocodeCalls === calls + 1 && r.body.cached === false, { calls, geocodeCalls, body: r.body });
+  ok('...the pin moves to the new address', r.body.lat === 41.0 && r.body.lng === -4.0, r.body);
+  ok('...and it stops being stale', r.body.addressStale === false, r.body);
+
+  calls = geocodeCalls;
+  r = await send('POST', '/2/geocode');
+  ok('control positive: the same call on a fresh pin is still cached, so the above is ' +
+     'the staleness check and not a broken cache',
+     geocodeCalls === calls && r.body.cached === true, { calls, geocodeCalls, body: r.body });
+
+  /* An accent-only edit. This is the assertion that catches the JavaScript rule and
+     the SQL rule drifting apart: MySQL 8's default collation is accent-insensitive,
+     so a plain string comparison in SQL calls these two the same address while
+     JavaScript calls them different. If they disagree, the API reports a store as
+     stale and the bulk geocoder never picks it up. */
+  await db.query(`UPDATE stores SET address='Gran Via 34, Madrid',
+                                    location_address='Gran Vía 34, Madrid' WHERE id=1`);
+  const s1 = await one(1);
+  ok('an accent-only address change is stale in JavaScript', s1.addressStale === true, s1);
+  ok('...and SQL agrees, so the batch and the API cannot disagree about it',
+     (await get('/needs-review')).body.stores.some(s => s.id === 1));
+
+  /* A hand-placed pin whose address was edited. It must still be protected, but it
+     also must not sit there silently: only a person can say whether the store moved
+     or somebody just tidied up the street name. */
+  await db.query(`UPDATE stores SET location_address = address WHERE id=6`);
+  await db.query(`UPDATE stores SET address='Otra Calle 5, Madrid' WHERE id=6`);
+  const m6 = (await get('/needs-review')).body.stores.find(s => s.id === 6);
+  ok('a hand-placed pin whose address changed does come up for review', !!m6, m6);
+  ok('...and it is still marked manual, not downgraded', m6 && m6.locationSource === 'manual', m6);
+  calls = geocodeCalls;
+  r = await send('POST', '/6/geocode');
+  ok('...but geocoding still refuses to move it',
+     r.body.skipped === 'manual' && geocodeCalls === calls, { calls, geocodeCalls, body: r.body });
+
+  /* An edited address that Google cannot place. It has to stop being stale - or the
+     next run asks the same unanswerable question and pays for it, forever - while
+     staying visible as a different kind of problem. */
+  await db.query(`UPDATE stores SET location_address = address WHERE id=4`);
+  await db.query(`UPDATE stores SET address='Direccion Imposible 999' WHERE id=4`);
+  ok('control positive: the edited address starts out stale', (await one(4)).addressStale === true);
+  r = await send('POST', '/4/geocode');
+  ok('an address Google cannot place is a 422', r.status === 422, r);
+  const s4 = await one(4);
+  ok('...the store is marked unresolved', s4.locationSource === 'unresolved', s4);
+  ok('...it stops being stale, so it is not paid for again on every future run',
+     s4.addressStale === false, s4);
+  ok('...its old pin is left exactly where it was', s4.lat !== null && s4.lng !== null, s4);
+  ok('...and it stays on the review list, as a bad address rather than a bad pin',
+     (await get('/needs-review')).body.stores.some(s => s.id === 4));
+
+  // Dragging a pin records what it was placed for, or it would look stale at once.
+  await send('PATCH', '/3/location', { lat: 40.5, lng: -3.5 });
+  const s3 = await one(3);
+  ok('dragging a pin records the address it was placed for',
+     s3.locationAddress === s3.address, s3);
+  ok('...so a hand-placed pin is not stale the moment it is made', s3.addressStale === false, s3);
+
+  /* Four buckets, assigned by priority so they are disjoint. If they were assigned
+     by test, a store that is both stale and imprecise would be counted twice and the
+     four numbers would not add up to the fifth - which reads as a broken report. */
+  const rv = (await get('/needs-review')).body;
+  ok('the review buckets add up to the total, so nothing is double-counted',
+     rv.stale + rv.unlocated + rv.unresolved + rv.imprecise === rv.count, rv);
+  ok('control positive: more than one bucket is actually populated',
+     [rv.stale, rv.unlocated, rv.unresolved, rv.imprecise].filter(n => n > 0).length >= 2, rv);
+  ok('the stale ones are listed first - a pin on the wrong street beats a vague one',
+     rv.stores[0].addressStale === true, rv.stores[0]);
+
   /* The whole router against a table and columns named nothing like the defaults.
      This is the assertion that says milestone 1 will fit the client's CRM whatever
      their names turn out to be - rather than me hoping they happen to match. */
@@ -252,7 +367,8 @@ const SEED = [
      id_tienda INT AUTO_INCREMENT PRIMARY KEY, nombre VARCHAR(191) NOT NULL,
      categoria VARCHAR(64) NOT NULL, direccion VARCHAR(255) NULL,
      lat DOUBLE NULL, lng DOUBLE NULL, geo_at DATETIME NULL,
-     origen ENUM('geocoded','manual') NULL, precision_geo VARCHAR(24) NULL)`);
+     origen ENUM('geocoded','manual','unresolved') NULL, precision_geo VARCHAR(24) NULL,
+     direccion_geo VARCHAR(512) NULL)`);
   for (const [n, c, la, lo, p] of [
     ['Sol ES', 'activa', 40.4169, -3.7035, 'ROOFTOP'],
     ['Chueca ES', 'potencial', 40.4235, -3.6975, 'APPROXIMATE'],
@@ -264,7 +380,7 @@ const SEED = [
   const esSchema = makeSchema({
     table: 'tiendas', id: 'id_tienda', name: 'nombre', category: 'categoria',
     address: 'direccion', latitude: 'lat', longitude: 'lng', geocodedAt: 'geo_at',
-    source: 'origen', precision: 'precision_geo',
+    source: 'origen', precision: 'precision_geo', locationAddress: 'direccion_geo',
   }, {});
   const esApp = express();
   esApp.use(express.json());

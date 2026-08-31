@@ -11,10 +11,12 @@ ALTER TABLE `stores`
   ADD COLUMN `latitude`   DOUBLE   NULL COMMENT 'WGS84, -90..90',
   ADD COLUMN `longitude`  DOUBLE   NULL COMMENT 'WGS84, -180..180',
   ADD COLUMN `geocoded_at` DATETIME NULL COMMENT 'when lat/lng was last derived from the address',
-  ADD COLUMN `location_source`     ENUM('geocoded','manual') NULL
-      COMMENT 'manual = a person dragged this pin; geocoding must not overwrite it',
+  ADD COLUMN `location_source`     ENUM('geocoded','manual','unresolved') NULL
+      COMMENT 'manual = a person dragged this pin, geocoding must not overwrite it; unresolved = the current address could not be geocoded',
   ADD COLUMN `location_precision`  VARCHAR(24) NULL
-      COMMENT 'Google location_type: ROOFTOP / RANGE_INTERPOLATED / GEOMETRIC_CENTER / APPROXIMATE';
+      COMMENT 'Google location_type: ROOFTOP / RANGE_INTERPOLATED / GEOMETRIC_CENTER / APPROXIMATE',
+  ADD COLUMN `location_address` VARCHAR(512) NULL
+      COMMENT 'the address this position was placed for; differs from the address column = the pin is stale';
 
 -- Composite index so the bounding-box prefilter in POST /api/stores/in-polygon
 -- is an index range scan instead of a full table scan.
@@ -32,7 +34,11 @@ CREATE INDEX `stores_latlng_idx` ON `stores` (`latitude`, `longitude`);
 -- `location_source` is what protects hand-corrected pins from a later bulk re-geocode.
 -- `location_precision` is Google's own confidence, which is how you find the pins worth
 -- checking without staring at all of them.
-
+-- `location_address` is how "somebody edited the address and the pin stayed
+-- behind" becomes something the system detects instead of something a driver
+-- discovers. It is NULL for every existing row, and NULL deliberately does NOT
+-- mean stale - otherwise switching this on would mark the whole table for
+-- re-geocoding.
 -- -- Rollback for `stores`
 -- DROP INDEX `stores_latlng_idx` ON `stores`;
 -- ALTER TABLE `stores`
@@ -40,4 +46,5 @@ CREATE INDEX `stores_latlng_idx` ON `stores` (`latitude`, `longitude`);
 --   DROP COLUMN `longitude`,
 --   DROP COLUMN `geocoded_at`,
 --   DROP COLUMN `location_source`,
---   DROP COLUMN `location_precision`;
+--   DROP COLUMN `location_precision`,
+--   DROP COLUMN `location_address`;

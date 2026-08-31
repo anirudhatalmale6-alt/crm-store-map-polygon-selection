@@ -25,7 +25,8 @@ ALTER TABLE ${table}
   DROP COLUMN ${q.longitude},
   DROP COLUMN ${q.geocodedAt},
   DROP COLUMN ${q.source},
-  DROP COLUMN ${q.precision};`);
+  DROP COLUMN ${q.precision},
+  DROP COLUMN ${q.locationAddress};`);
   process.exit(0);
 }
 
@@ -42,10 +43,12 @@ ALTER TABLE ${table}
   ADD COLUMN ${q.latitude}   DOUBLE   NULL COMMENT 'WGS84, -90..90',
   ADD COLUMN ${q.longitude}  DOUBLE   NULL COMMENT 'WGS84, -180..180',
   ADD COLUMN ${q.geocodedAt} DATETIME NULL COMMENT 'when lat/lng was last derived from the address',
-  ADD COLUMN ${q.source}     ENUM('geocoded','manual') NULL
-      COMMENT 'manual = a person dragged this pin; geocoding must not overwrite it',
+  ADD COLUMN ${q.source}     ENUM('geocoded','manual','unresolved') NULL
+      COMMENT 'manual = a person dragged this pin, geocoding must not overwrite it; unresolved = the current address could not be geocoded',
   ADD COLUMN ${q.precision}  VARCHAR(24) NULL
-      COMMENT 'Google location_type: ROOFTOP / RANGE_INTERPOLATED / GEOMETRIC_CENTER / APPROXIMATE';
+      COMMENT 'Google location_type: ROOFTOP / RANGE_INTERPOLATED / GEOMETRIC_CENTER / APPROXIMATE',
+  ADD COLUMN ${q.locationAddress} VARCHAR(512) NULL
+      COMMENT 'the address this position was placed for; differs from the address column = the pin is stale';
 
 -- Composite index so the bounding-box prefilter in POST /api/stores/in-polygon
 -- is an index range scan instead of a full table scan.
@@ -62,4 +65,9 @@ CREATE INDEX \`${indexName}\` ON ${table} (${q.latitude}, ${q.longitude});
 --
 -- ${q.source} is what protects hand-corrected pins from a later bulk re-geocode.
 -- ${q.precision} is Google's own confidence, which is how you find the pins worth
--- checking without staring at all of them.`);
+-- checking without staring at all of them.
+-- ${q.locationAddress} is how "somebody edited the address and the pin stayed
+-- behind" becomes something the system detects instead of something a driver
+-- discovers. It is NULL for every existing row, and NULL deliberately does NOT
+-- mean stale - otherwise switching this on would mark the whole table for
+-- re-geocoding.`);

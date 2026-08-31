@@ -54,7 +54,9 @@ const SEED = [
   }
   const row = async (id) => (await db.query(
     `SELECT ${q.latitude} AS lat, ${q.longitude} AS lng, ${q.source} AS src,
-            ${q.precision} AS prec, ${q.geocodedAt} AS at FROM ${table} WHERE ${q.id} = ?`,
+            ${q.precision} AS prec, ${q.geocodedAt} AS at,
+            ${q.address} AS addr, ${q.locationAddress} AS locAddr
+       FROM ${table} WHERE ${q.id} = ?`,
     [id]))[0];
 
   let calls = [];
@@ -160,6 +162,74 @@ const SEED = [
   ok('control positive: there were more rows it could have tried', st.total > 1, st.total);
   ok('nothing was written', (await row(1)).lat === null);
 
+  /* ---- addresses that change after the pin was placed ----
+     A rename in the CRM must cost nothing. An ADDRESS edit leaves the pin on the
+     old street, and this is the run that fixes those - but only when asked, because
+     an afternoon of address tidying should not turn into a Google bill by itself. */
+  console.log('\naddresses edited after the pin was placed');
+  await reseed(); calls = [];
+  await runBatch({ db, geocode: geocoder(), schema, limit: 100, qps: 50, log: quiet });
+  const done = await row(1);
+  ok('a normal run records which address produced the coordinates',
+     done.locAddr === done.addr && done.locAddr !== null, done);
+
+  await db.query(`UPDATE ${table} SET ${q.address} = 'Gran Via 1 BIS, Madrid' WHERE ${q.id} = 1`);
+  calls = [];
+  st = await runBatch({ db, geocode: geocoder(), schema, limit: 100, qps: 50, log: quiet });
+  ok('an edited address is NOT picked up by default - refreshing is opt-in',
+     !calls.includes('Gran Via 1 BIS, Madrid'), calls);
+  ok('...and the pin is left exactly where it was', (await row(1)).lat === 40.41);
+
+  calls = [];
+  st = await runBatch({ db, geocode: geocoder(), schema, limit: 100,
+                        refreshChanged: true, qps: 50, log: quiet });
+  ok('--refresh-changed picks it up', calls.includes('Gran Via 1 BIS, Madrid'), calls);
+  ok('...and records the new address against the new pin',
+     (await row(1)).locAddr === 'Gran Via 1 BIS, Madrid', await row(1));
+
+  // Control positive: it terminates. Without this, "it found something" could just
+  // mean it re-geocodes the whole table on every run.
+  calls = [];
+  st = await runBatch({ db, geocode: geocoder(), schema, limit: 100,
+                        refreshChanged: true, qps: 50, log: quiet });
+  ok('control positive: a second --refresh-changed run has nothing left to do',
+     calls.length === 0 && st.total === 0, { calls, total: st.total });
+
+  // A hand-placed pin whose address was edited. The script must not touch it, and
+  // must not stay silent about it either.
+  await db.query(`UPDATE ${table} SET ${q.locationAddress} = ${q.address} WHERE ${q.id} = 7`);
+  await db.query(`UPDATE ${table} SET ${q.address} = 'Chueca 99, Madrid' WHERE ${q.id} = 7`);
+  calls = [];
+  st = await runBatch({ db, geocode: geocoder(), schema, limit: 100,
+                        refreshChanged: true, qps: 50, log: quiet });
+  ok('--refresh-changed never re-geocodes a hand-placed pin',
+     !calls.includes('Chueca 99, Madrid'), calls);
+  ok('...its coordinates are untouched', (await row(7)).lat === 40.5, await row(7));
+  ok('...and it is reported rather than silently skipped, because only a person ' +
+     'can say whether the store moved', st.manualStale === 1, st);
+
+  /* An edited address that Google cannot resolve. This is the same cost bug as the
+     unresolvable-address case, in a new place: if the failed attempt is not recorded
+     against the new address, the row stays stale and is paid for on every future
+     --refresh-changed run, forever. */
+  await db.query(`UPDATE ${table} SET ${q.address} = 'qqqq zzzz not an address' WHERE ${q.id} = 2`);
+  calls = [];
+  await runBatch({ db, geocode: geocoder(), schema, limit: 100,
+                   refreshChanged: true, qps: 50, log: quiet });
+  ok('an edited address that cannot be geocoded is tried once', calls.length === 1, calls);
+  const bad = await row(2);
+  ok('...and marked unresolved rather than geocoded', bad.src === 'unresolved', bad);
+  ok('...with its old pin left in place', bad.lat !== null, bad);
+  calls = [];
+  st = await runBatch({ db, geocode: geocoder(), schema, limit: 100,
+                        refreshChanged: true, qps: 50, log: quiet });
+  ok('...and it is NOT asked again on the next run', calls.length === 0, calls);
+  calls = [];
+  await runBatch({ db, geocode: geocoder(), schema, limit: 100,
+                   retryFailed: true, qps: 50, log: quiet });
+  ok('...but --retry-failed still reaches it once the address is corrected',
+     calls.includes('qqqq zzzz not an address'), calls);
+
   console.log('\nworks against a differently-named table');
   // Proves schema.js is actually wired through, rather than the default names
   // simply happening to match.
@@ -168,12 +238,13 @@ const SEED = [
      id INT AUTO_INCREMENT PRIMARY KEY, nombre VARCHAR(191) NOT NULL,
      categoria VARCHAR(64) NOT NULL, direccion VARCHAR(255) NULL,
      lat DOUBLE NULL, lng DOUBLE NULL, geo_at DATETIME NULL,
-     origen ENUM('geocoded','manual') NULL, precision_geo VARCHAR(24) NULL)`);
+     origen ENUM('geocoded','manual','unresolved') NULL, precision_geo VARCHAR(24) NULL,
+     direccion_geo VARCHAR(512) NULL)`);
   await db.query(`INSERT INTO tiendas (nombre, categoria, direccion) VALUES ('T1','active','Gran Via 9, Madrid')`);
   const esSchema = makeSchema({
     table: 'tiendas', name: 'nombre', category: 'categoria', address: 'direccion',
     latitude: 'lat', longitude: 'lng', geocodedAt: 'geo_at', source: 'origen',
-    precision: 'precision_geo',
+    precision: 'precision_geo', locationAddress: 'direccion_geo',
   }, {});
   calls = [];
   st = await runBatch({ db, geocode: geocoder(), schema: esSchema, limit: 10, qps: 50, log: quiet });
