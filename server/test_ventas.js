@@ -21,7 +21,7 @@ const mysql = require('mysql2/promise');
 const {
   ventasSchema, composeAddress, composeAddressSql,
   isPlaceholder, isInternational, geocodability, hasUsableStreet, hasUsableLocality,
-  streetIsPlaceHint,
+  streetIsPlaceHint, inColombia, pinLooksWrong,
 } = require('./ventas');
 
 function arg(name, fallback) {
@@ -202,6 +202,35 @@ const ok = (name, cond, extra = '') => {
       ok(`"${street.slice(0, 34)}" is kept`, !!found && geocodability(found) !== 'none',
          found ? geocodability(found) : 'row not in dump');
     }
+    /* ── Pins that landed in the wrong country ────────────────────────────────
+       Every case below is a real row from the real run, with the coordinates
+       Google actually returned. Precision does not catch any of them: the
+       Manhattan one came back RANGE_INTERPOLATED, which reads as confident. */
+    ok('a Bogota pin is inside Colombia', inColombia(4.6571, -74.0575));
+    ok('a Medellin pin is inside Colombia', inColombia(6.3087, -75.5769));
+
+    /* THE control positive. San Andres is 700km off Nicaragua and is Colombian.
+       The first version of this check used a mainland-only box and reported this
+       correct pin as foreign — a check that "corrects" good data is worse than
+       no check. */
+    ok('San Andres is Colombia, not a foreign pin', inColombia(12.5769, -81.7051));
+    ok('Malpelo is Colombia too', inColombia(4.0, -81.6));
+
+    ok('Panama City is not Colombia', !inColombia(8.9625, -79.5407));
+    ok('Manhattan is not Colombia', !inColombia(40.7355, -73.9923));
+    ok('San Juan, Puerto Rico is not Colombia', !inColombia(18.4335, -66.0478));
+    ok('non-numeric coordinates are not "in Colombia"', !inColombia(null, undefined));
+
+    ok('a good pin is not flagged', pinLooksWrong({ lat: 4.6571, lng: -74.0575, state: 'Cundinamarca' }) === null);
+    ok('the Manhattan pin IS flagged, which precision never would be',
+       pinLooksWrong({ lat: 40.7355, lng: -73.9923, state: 'Tachira' }) !== null);
+    ok('the San Andres pin is NOT flagged',
+       pinLooksWrong({ lat: 12.5769, lng: -81.7051, state: 'San Andres y Providencia' }) === null);
+    /* Internacional rows are meant to be abroad, so there is nothing to contradict. */
+    ok('an Internacional row abroad is not flagged',
+       pinLooksWrong({ lat: -2.0452, lng: -79.8918, state: 'Internacional' }) === null);
+    ok('a row with no pin yet is not flagged', pinLooksWrong({ lat: null, lng: null, state: 'Antioquia' }) === null);
+
   } finally {
     await pool.end();
   }

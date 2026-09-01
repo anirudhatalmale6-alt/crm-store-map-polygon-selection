@@ -41,10 +41,10 @@ node server/test_schema.js    # 42 assertions on the table/column config (no dat
 node server/test_geocoder.js  # 26 assertions on the geocoder (stubbed fetch, no cost)
 node server/test_api.js       # 89 assertions: real Express + real MySQL + real HTTP
 node server/test_batch.js     # 53 assertions on the bulk geocoding run (real MySQL)
-node server/test_ventas.js    # 47 assertions against YOUR schema and YOUR 2,657 rows
+node server/test_ventas.js    # 60 assertions against YOUR schema and YOUR 2,657 rows
 ```
 
-375 assertions. `test_ventas.js` is the one that matters most, because it is the
+388 assertions. `test_ventas.js` is the one that matters most, because it is the
 only suite whose inputs I did not choose — it runs over your actual data, and every
 correction listed under "Your actual database, measured" below was forced by it.
 
@@ -641,6 +641,88 @@ are right, or that Google's tiles render. Those need a real key on the real doma
 `AdvancedMarkerElement`. Google says it is *not* scheduled for removal, so it still
 works — but DrawingManager was "deprecated" once too, so it is written down here
 rather than left as a surprise.
+
+## The full run, done — 2,423 pins
+
+The sample below predicted this. Then the whole thing was run, so the numbers here
+are counted rather than extrapolated. **$12.12, exactly what the dry run quoted.**
+
+```
+2657 address rows
+  2423 pinned
+  234 not placed (no street and no usable city - never sent to Google)
+
+  ROOFTOP              1701  70.2%
+  RANGE_INTERPOLATED    152   6.3%     exact enough to trust:  1853  76.5%
+  APPROXIMATE           380  15.7%
+  GEOMETRIC_CENTER      190   7.8%     wants a look:            570  23.5%
+```
+
+**Nothing failed.** No errors, and not one address came back empty — every single
+one of the 2,423 sent got a result. The sample had predicted ~2,326 pins; the true
+figure is 2,423, so it was slightly pessimistic. Exactness landed almost exactly
+where predicted (76.5% measured against 78% predicted), which is the useful part:
+the sampling method can be trusted next time before spending.
+
+`node server/pin-audit.js` produces all of the below. It is read-only.
+
+### Three pins landed in the wrong country, and precision did not catch one of them
+
+This is the finding worth having.
+
+```
+1978    8.9625,-79.5407   GEOMETRIC_CENTER    Calidonia, avenida central españa, ... Colombia
+2165   40.7355,-73.9923   RANGE_INTERPOLATED  AV 9 ... BARRIO SAN MARTIN RUBIO TACHIRA ... Colombia
+3482   18.4335,-66.0478   APPROXIMATE         Barrio Obrero, Calle 7 # 22 D -26, ... Pasto, Nariño, Colombia
+```
+
+Panama City, **Manhattan**, and San Juan in Puerto Rico. Google matched a
+Colombian address to a foreign place with a similar name — Calidonia is a district
+of Panama City, Barrio Obrero is a neighbourhood of San Juan. Appending
+", Colombia" does not prevent it.
+
+The important part: **row 2165 came back `RANGE_INTERPOLATED`**, which reads as
+confident, and it is in New York. A review list sorted by Google's own confidence
+puts that pin near the bottom, where nobody looks. Confidence answers "did I find
+a precise address" — not "did I find the right one".
+
+So `pinLooksWrong()` in `ventas.js` checks the pin against the country the row
+claims, independently of precision, and `test_ventas.js` asserts all three of
+these are flagged.
+
+⚠ And row 2165 is your own point in reverse: `San Martin, Tachira` is in
+**Venezuela**, not Colombia, but the row is not marked `Internacional`. So
+alongside the 24 marked international rows that may have the wrong country, there
+is at least one unmarked row that genuinely is abroad.
+
+⚠ The first version of that check used a single mainland box, and reported a
+correct San Andrés pin as foreign. San Andrés y Providencia is 700 km off
+Nicaragua and is Colombian; Malpelo is far out in the Pacific. A check that
+"corrects" good data is worse than no check, so all three territories are in the
+test, San Andrés as an explicit control that must **not** be flagged.
+
+### The placeholder address, again — 421 rows
+
+`1503` is not an address. It appears as the street on **421 of your 2,657 rows**,
+and it splits in two:
+
+- **232** have no usable city either, so they were never sent. That is $1.16 not
+  spent on requests that could not succeed.
+- **189** do name a city, so they got pinned — at that city's centre. Every one of
+  them came back `APPROXIMATE`; **none** falsely claims to be precise, so they all
+  land on the review list on their own. They are honest pins of a city, standing in
+  for shops whose address nobody ever typed.
+
+### 910 rows share a pin with another row — and mostly that is fine
+
+315 coordinates carry more than one store, the largest being 38 stores on one
+point in Cali (all of them `1503`). But **544 of those 910 rows are `ROOFTOP`** —
+genuinely the same building: shopping centres, and several units at one street
+number. That is real, not an artefact.
+
+It does affect the map though: without clustering, thirty-eight markers stack into
+what looks like one. The demo already clusters, which is why this is a note rather
+than a problem.
 
 ## What Google can actually find: measured, not estimated
 

@@ -239,8 +239,57 @@ function geocodability(row) {
   return 'none';
 }
 
+/* ── Did the pin land in the right country? ───────────────────────────────────
+ *
+ * Google's confidence rating does NOT catch this, which is the whole reason this
+ * exists. On the real run, `AV 9 ENTRE CALLES 14 Y 15 ... BARRIO SAN MARTIN RUBIO
+ * TACHIR` came back as RANGE_INTERPOLATED — a confident rating — pinned in
+ * Manhattan. A review list built on precision alone would show it as one of the
+ * good ones. Three pins out of 2,423 landed in the wrong country and the
+ * precision column flagged none of them.
+ *
+ * The failure mode is Google matching a Colombian address to a foreign place with
+ * a similar name: "Calidonia" is a district of Panama City, "Barrio Obrero" is a
+ * neighbourhood of San Juan. Appending ", Colombia" does not stop it.
+ *
+ * ⚠ Colombia is not one box. San Andrés y Providencia is 700 km off Nicaragua and
+ * is Colombian; Malpelo is 500 km out in the Pacific. A mainland-only box reports
+ * a perfectly good San Andrés pin as foreign — which it did, on the first version
+ * of this check, and that is exactly how a correct pin gets "corrected".
+ */
+const COLOMBIA_BOXES = [
+  { name: 'mainland',                minLat: -4.30, maxLat: 13.50, minLng: -79.10, maxLng: -66.80 },
+  { name: 'San Andrés y Providencia', minLat: 12.00, maxLat: 13.50, minLng: -81.90, maxLng: -81.20 },
+  { name: 'Malpelo',                 minLat:  3.90, maxLat:  4.10, minLng: -81.70, maxLng: -81.50 },
+];
+
+function inColombia(lat, lng) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  return COLOMBIA_BOXES.some(b =>
+    lat >= b.minLat && lat <= b.maxLat && lng >= b.minLng && lng <= b.maxLng);
+}
+
+/**
+ * Is this pin worth a second look, for a reason the precision column cannot see?
+ * Returns a reason string, or null when nothing is obviously wrong.
+ *
+ * Deliberately says nothing about rows marked Internacional: their country is not
+ * Colombia by design, so there is nothing here to contradict.
+ */
+function pinLooksWrong(row) {
+  if (row == null || row.lat == null || row.lng == null) return null;
+  if (isInternational(row)) return null;
+  const lat = Number(row.lat), lng = Number(row.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return 'coordinates are not numbers';
+  if (!inColombia(lat, lng)) {
+    return 'pinned outside Colombia, but the row is not marked Internacional';
+  }
+  return null;
+}
+
 module.exports = {
   VENTAS, LOCATION_COLS, ventasSchema,
+  COLOMBIA_BOXES, inColombia, pinLooksWrong,
   composeAddress, composeAddressSql, isPlaceholder, isInternational, addressParts,
   hasUsableStreet, hasUsableLocality, streetIsPlaceHint, geocodability,
   CITY_PLACEHOLDERS, INTERNATIONAL_MARKER,
