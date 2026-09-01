@@ -38,13 +38,13 @@ node test-selection.js        # 23 assertions on the selection + clustering engi
 python3 test_ui.py            # 75 assertions driving the real browser + screenshots
 python3 test_gmaps_surface.py # 20 assertions on the GOOGLE surface, with no API key
 node server/test_schema.js    # 42 assertions on the table/column config (no database)
-node server/test_geocoder.js  # 16 assertions on the geocoder (stubbed fetch, no cost)
+node server/test_geocoder.js  # 26 assertions on the geocoder (stubbed fetch, no cost)
 node server/test_api.js       # 89 assertions: real Express + real MySQL + real HTTP
 node server/test_batch.js     # 53 assertions on the bulk geocoding run (real MySQL)
 node server/test_ventas.js    # 47 assertions against YOUR schema and YOUR 2,657 rows
 ```
 
-365 assertions. `test_ventas.js` is the one that matters most, because it is the
+375 assertions. `test_ventas.js` is the one that matters most, because it is the
 only suite whose inputs I did not choose — it runs over your actual data, and every
 correction listed under "Your actual database, measured" below was forced by it.
 
@@ -431,6 +431,74 @@ node server/geocode-batch.js --limit 2000
 - **It stops on the first quota or permission error** instead of burning through
   the rest of the batch failing identically.
 - **It never touches a hand-corrected pin.**
+
+### Running it against YOUR database — `server/geocode-ventas.js`
+
+`geocode-batch.js` above is written against the demo's single `stores` table.
+Your addresses live in `client_address`, and the string worth sending to Google is
+four of its columns joined together. `server/geocode-ventas.js` points the same
+engine at your schema:
+
+```sh
+node server/geocode-ventas.js --dry-run --limit 5000    # costs nothing
+node server/geocode-ventas.js --limit 50                # 50 for real
+node server/geocode-ventas.js --limit 2500 --qps 12     # the rest
+```
+
+It is the same engine on purpose. Every rule listed above — resumable, never
+re-pays for a failure, never touches a hand-placed pin, stops dead on a quota
+error — is covered by the 53 assertions in `test_batch.js`, and a second copy of
+that logic written for your table would be a second set of bugs. What this file
+adds is only what is specific to your data:
+
+- **The address is composed, not read from one column.** `composeAddressSql()`
+  builds it in SQL and `composeAddress()` builds it in JavaScript, and
+  `test_ventas.js` runs all 2,657 of your rows through both and asserts they come
+  out byte-identical. That matters beyond tidiness: the composed string is stored
+  in `location_address`, so "has this address changed since we placed the pin"
+  compares like with like. Compose it one way to select and another way to store,
+  and every row reports as permanently stale — meaning a full re-geocode, of
+  everything, on every run.
+- **Rows nothing could place are never sent.** 234 of yours have no street and no
+  usable city. A request that cannot succeed is billed the same as one that does,
+  so they are marked for review instead — that is $1.17 that buys nothing.
+- **`--dry-run` prices the run**, using the same skip rule the real run uses. On
+  your data it reports `2423 of these would be sent to Google ≈ $12.12`.
+
+### The key restriction that silently refused every request
+
+Worth writing down, because it cost an afternoon and looked like a broken key.
+
+The Geocoding key is correctly restricted **by IP address** — that is what a
+server-side key should be restricted by. The allow-list had this machine's IPv4
+address on it. Every request was still refused:
+
+```
+REQUEST_DENIED — This IP, site or mobile application is not authorized to use
+this API key. Request received from IP address 2a01:4f8:c17:292c::1
+```
+
+That address is this same machine. It has an IPv4 address *and* an IPv6 address,
+and Node prefers IPv6 when both resolve, so requests left by an address that was
+never on the list. The key was fine and the restriction was fine.
+
+The nasty part is that it is **intermittent**. Happy Eyeballs races the two
+address families and takes whichever connects first, so the same command can
+succeed and then fail. A batch of 2,400 paid requests that half-fails is worse
+than one that fails outright, because the failures get written to the database as
+"could not be geocoded" against addresses that are perfectly good.
+
+Two fixes, and the run needs both:
+
+- `server/egress.js` pins outbound connections to IPv4 — better than asking you to
+  allow-list an address I can simply stop using. Both `ipv4first` *and*
+  `setDefaultAutoSelectFamily(false)` are needed; ordering alone is not a
+  guarantee, because Happy Eyeballs may take the winner of the race regardless.
+- **A preflight.** One request against a known landmark before spending anything,
+  so a refused key stops the run at $0.005 instead of at $12 and several hundred
+  wrongly-condemned addresses. If it does fail, the error now repeats back the IP
+  address Google actually saw, instead of telling you to check a key that is not
+  what is wrong.
 
 ### Finding the ones that came out wrong
 

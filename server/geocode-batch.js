@@ -22,6 +22,7 @@
  * Never touches a row whose location_source is 'manual'. See stores.routes.js.
  */
 const makeGeocoder = require('./geocoder');
+const { pinToIPv4 } = require('./egress');
 const { makeSchema } = require('./schema');
 const { staleSql } = require('./address');
 
@@ -30,10 +31,14 @@ const { staleSql } = require('./address');
  * geocoder - a batch job that has never been run against a database is a guess. */
 async function runBatch({ db, geocode, schema = makeSchema(), limit = 100, force = false,
                           retryFailed = false, refreshChanged = false,
-                          dryRun = false, qps = 10, log = console.log }) {
-  const { q, table, selectCols } = schema;
+                          dryRun = false, qps = 10, log = console.log, skip = null }) {
+  const { q, table } = schema;
+  /* The address is an expression, not necessarily a column: one `address` field on
+     the demo table, four columns concatenated on the real CRM. See schema.js. */
+  const addressExpr = schema.addressExpr || q.address;
+  const extraCols = schema.extraCols || [];
 
-  const hasAddress = `${q.address} IS NOT NULL AND ${q.address} <> ''`;
+  const hasAddress = `${addressExpr} IS NOT NULL AND ${addressExpr} <> ''`;
   /* `location_source <=> 'manual'` is the null-safe comparison, and it matters.
      Plain `!= 'manual'` evaluates to NULL for every row that has never been
      positioned - and NULL is not true, so those rows, the ones that most need
@@ -42,7 +47,7 @@ async function runBatch({ db, geocode, schema = makeSchema(), limit = 100, force
   const notManual = `NOT (${q.source} <=> 'manual')`;
   const noCoords  = `(${q.latitude} IS NULL OR ${q.longitude} IS NULL)`;
 
-  const stale = staleSql(q);
+  const stale = staleSql(q, addressExpr);
   /* Never even attempted. geocoded_at IS NULL is what makes this run finite: an
      address Google cannot resolve gets stamped and then stops being a candidate.
      Without that clause the same unresolvable addresses are paid for again on
@@ -81,24 +86,64 @@ async function runBatch({ db, geocode, schema = makeSchema(), limit = 100, force
   }
   if (total > limit) log(`this run will do ${limit} of them (--limit); run it again for the rest`);
 
+  /* Its own SELECT rather than the schema's full one. This job needs an id and an
+     address; the API's list of columns includes a name and a category that do not
+     exist on every table this can be pointed at. */
+  const cols = [`${q.id} AS id`, `${addressExpr} AS address`, ...extraCols].join(', ');
   const rows = await db.query(
-    `SELECT ${selectCols} FROM ${table} WHERE ${where} ORDER BY ${q.id} LIMIT ?`,
+    `SELECT ${cols} FROM ${table} WHERE ${where} ORDER BY ${q.id} LIMIT ?`,
     [Math.min(limit, total)]
   );
 
   const stats = { total, manual, manualStale, considered: rows.length, ok: 0, noResult: 0,
-                  failed: 0, stoppedEarly: false, byPrecision: {}, failures: [] };
+                  failed: 0, skipped: 0, stoppedEarly: false, byPrecision: {},
+                  failures: [], skips: [] };
 
   if (dryRun) {
+    /* Apply the skip rule here too. The whole reason to run --dry-run is to find
+       out what the run will cost, and a count that includes rows the real run
+       would never send is not that number. */
+    for (const row of rows) {
+      const why = skip ? skip(row) : null;
+      if (why) { stats.skipped++; stats.skips.push({ id: row.id, address: row.address, why }); }
+    }
+    const willSend = rows.length - stats.skipped;
     log('\n--dry-run: nothing was called and nothing was written.');
-    rows.slice(0, 10).forEach(r => log(`  ${r.id}  ${r.address}`));
-    if (rows.length > 10) log(`  ... and ${rows.length - 10} more`);
+    log(`${willSend} of these would be sent to Google ≈ $${(willSend * 0.005).toFixed(2)}` +
+        (stats.skipped ? `; ${stats.skipped} would not be sent at all` : ''));
+    rows.filter(r => !(skip && skip(r))).slice(0, 10).forEach(r => log(`  ${r.id}  ${r.address}`));
+    if (willSend > 10) log(`  ... and ${willSend - 10} more`);
+    if (stats.skipped) {
+      log(`\nnot sent:`);
+      stats.skips.slice(0, 5).forEach(s => log(`  ${s.id}  ${s.why}  ${JSON.stringify(s.address)}`));
+      if (stats.skips.length > 5) log(`  ... and ${stats.skips.length - 5} more`);
+    }
     return stats;
   }
 
   const interval = 1000 / qps;
   for (const row of rows) {
     const started = Date.now();
+
+    /* Rows a geocoder cannot possibly place — no street and no usable city. A
+       request that cannot succeed costs exactly as much as one that does, and
+       234 of the real rows are in this state. They are stamped 'unresolved' for
+       the same reason a no-result is: an unstamped row stays in the candidate
+       set forever, eats the --limit budget on every future run, and the script
+       never gets to say "nothing left to do". Nothing is sent and nothing is
+       charged; they land on the review list, which is where a person can fix the
+       address. */
+    const why = skip ? skip(row) : null;
+    if (why) {
+      await db.query(
+        `UPDATE ${table} SET ${q.geocodedAt} = NOW(), ${q.source} = 'unresolved',
+                             ${q.precision} = NULL, ${q.locationAddress} = ?
+          WHERE ${q.id} = ?`, [row.address, row.id]);
+      stats.skipped++;
+      stats.skips.push({ id: row.id, address: row.address, why });
+      continue;                       // no wait: we did not call anybody
+    }
+
     try {
       const hit = await geocode(row.address);
       if (!hit) {
@@ -159,6 +204,11 @@ if (require.main === module) {
     return v === undefined || v.startsWith('--') ? true : v;
   };
 
+  /* Before anything else: leave by the address the key is allow-listed for.
+     See server/egress.js — this machine has both an IPv4 and an IPv6 address,
+     only one of which the client allow-listed, and Node prefers the other. */
+  pinToIPv4();
+
   const dryRun = process.argv.includes('--dry-run');
   const force  = process.argv.includes('--force');
   const retryFailed = process.argv.includes('--retry-failed');
@@ -195,6 +245,26 @@ if (require.main === module) {
       apiKey: process.env.GOOGLE_GEOCODING_KEY,
       region: process.env.GEOCODE_REGION || undefined,
     });
+
+    /* One request, on a landmark, before spending money on 2,400 of them.
+       The failure this prevents: a key restriction that rejects us silently, a
+       run that writes "could not be geocoded" against several hundred perfectly
+       good addresses, and a bill for the privilege. Costs $0.005 and takes a
+       second. Skipped on a dry run, which makes no calls at all. */
+    if (!dryRun) {
+      process.stdout.write('preflight: one request to check the key and our IP ... ');
+      try {
+        const hit = await geocode('Plaza de Bolivar, Bogota, Colombia');
+        if (!hit) throw new Error('a known landmark returned no result - check GEOCODE_REGION');
+        console.log(`ok (${hit.precision})`);
+      } catch (e) {
+        console.error('FAILED\n');
+        console.error(String(e.message || e));
+        console.error('\nNothing was geocoded and nothing was charged. Fix the above and re-run.');
+        await pool.end();
+        process.exit(3);
+      }
+    }
 
     const stats = await runBatch({ db, geocode, limit, force, retryFailed,
                                    refreshChanged, dryRun, qps });

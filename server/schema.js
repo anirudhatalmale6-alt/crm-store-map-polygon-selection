@@ -89,12 +89,42 @@ function makeSchema(overrides = {}, env = process.env) {
     `${q.locationAddress} AS location_address`,
   ].join(', ');
 
+  /* ── The address as an EXPRESSION, not always a column ──────────────────────
+   *
+   * The demo table has one `address` column. Your CRM does not: the address a
+   * geocoder can use is four columns of `client_address` joined together, and
+   * `composeAddressSql()` in ventas.js is the agreed way to join them (the test
+   * suite runs every one of your 2,657 rows through it and through the
+   * JavaScript version and asserts the two produce byte-identical strings).
+   *
+   * So everything that READS an address reads this expression instead of a bare
+   * column name. It defaults to the column, which is why the demo is unaffected.
+   *
+   * It has to be the SAME expression everywhere, and that is the whole point of
+   * putting it here rather than at each call site. `location_address` stores what
+   * was actually sent to Google, and staleness is "does the address now differ
+   * from the one the pin came from". Compose it one way when selecting and
+   * another way when storing and every row looks permanently stale — which means
+   * re-geocoding all 2,657 of them on every run, forever.
+   *
+   * ⚠ This is raw SQL spliced into queries, so unlike every name above it is NOT
+   * read from the environment. It comes from code, built out of already-quoted
+   * identifiers. An environment variable that could inject an arbitrary SQL
+   * expression would undo the whole point of ident() above. */
+  const addressExpr = overrides.addressExpr || q.address;
+
+  /* Extra `expr AS alias` columns the bulk runner needs to decide whether a row
+     is worth sending to Google at all — the individual street/city/state parts,
+     which are gone once they have been concatenated into one string. */
+  const extraCols = overrides.extraCols || [];
+
   /* Derived from the table, not hardcoded: index names are global per schema in
      MySQL only in the sense that they must be unique per table, but a migration
      that adds `stores_latlng_idx` to a table called `client_address` is a puzzle
      for whoever reads it next. For the default table this still produces exactly
      `stores_latlng_idx`, so migration 001 is unchanged. */
-  return { names, q, table: q.table, selectCols, indexName: `${names.table}_latlng_idx` };
+  return { names, q, table: q.table, selectCols, addressExpr, extraCols,
+           indexName: `${names.table}_latlng_idx` };
 }
 
 module.exports = { makeSchema, ident, DEFAULTS };

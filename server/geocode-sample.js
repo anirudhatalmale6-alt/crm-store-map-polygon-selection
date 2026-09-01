@@ -34,6 +34,11 @@
 const fs = require('fs');
 const mysql = require('mysql2/promise');
 const { ventasSchema, composeAddress, geocodability, isInternational } = require('./ventas');
+const { pinToIPv4, explainDenial } = require('./egress');
+
+// The key is restricted to this machine's IPv4 address; Node would otherwise
+// prefer its IPv6 one and be refused. See server/egress.js.
+pinToIPv4();
 
 function arg(name, fallback) {
   const i = process.argv.indexOf('--' + name);
@@ -150,6 +155,14 @@ async function geocodeOne(address) {
     const res = await fetch(url);
     const body = await res.json().catch(() => ({ status: 'BAD_JSON' }));
     // OVER_QUERY_LIMIT is the one status worth retrying; the rest are answers.
+    /* A denial applies to every request, not this one — stop on the first
+       rather than walking the whole sample collecting the same refusal. */
+    if (body.status === 'REQUEST_DENIED') {
+      const why = explainDenial(body.error_message);
+      console.error('\nREQUEST_DENIED: ' + (body.error_message || ''));
+      if (why) console.error('  ' + why.hint);
+      process.exit(3);
+    }
     if (body.status !== 'OVER_QUERY_LIMIT') return body;
     await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
   }

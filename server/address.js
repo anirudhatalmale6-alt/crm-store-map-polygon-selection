@@ -33,9 +33,14 @@ function addressIsStale(currentAddress, locationAddress) {
  * compares bytes and so cannot drift with the column's collation. The test suite
  * feeds exactly that accented pair through both paths and asserts they agree.
  */
-function staleSql(q) {
-  return `(${q.locationAddress} IS NOT NULL AND ${q.address} IS NOT NULL
-           AND NOT (CAST(${q.address} AS BINARY) <=> CAST(${q.locationAddress} AS BINARY)))`;
+/* `addressExpr` is the address as the rest of the system reads it — a bare column
+ * for the demo table, a CONCAT_WS over four columns for the real CRM. It must be
+ * the same expression that produced the string in location_address, or every row
+ * compares unequal to itself and the whole table reports as stale. See
+ * schema.addressExpr. */
+function staleSql(q, addressExpr = q.address) {
+  return `(${q.locationAddress} IS NOT NULL AND ${addressExpr} IS NOT NULL
+           AND NOT (CAST(${addressExpr} AS BINARY) <=> CAST(${q.locationAddress} AS BINARY)))`;
 }
 
 module.exports = { addressIsStale, staleSql };

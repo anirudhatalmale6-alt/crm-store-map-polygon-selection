@@ -5,6 +5,7 @@
  * refresh never costs a request. See the geocoded_at column in migration 001.
  */
 const ENDPOINT = 'https://maps.googleapis.com/maps/api/geocode/json';
+const { explainDenial } = require('./egress');
 
 module.exports = function makeGeocoder({ apiKey, region, fetchImpl = fetch }) {
   if (!apiKey) throw new Error('geocoder: apiKey is required');
@@ -32,8 +33,15 @@ module.exports = function makeGeocoder({ apiKey, region, fetchImpl = fetch }) {
         // "not geocodable" into the database for an address that is perfectly fine,
         // and it would never be retried.
         throw new Error(`geocoder: quota exceeded (${body.status})`);
-      case 'REQUEST_DENIED':
-        throw new Error(`geocoder: request denied - ${body.error_message || 'check the API key and that Geocoding API is enabled'}`);
+      case 'REQUEST_DENIED': {
+        /* Nearly always an IP restriction rather than a bad key, and Google says
+           which address it saw. Repeat that address back instead of sending the
+           operator off to re-check a key that is fine. */
+        const why = explainDenial(body.error_message);
+        throw new Error('geocoder: request denied - '
+          + (body.error_message || 'check the API key and that Geocoding API is enabled')
+          + (why ? `\n  ${why.hint}` : ''));
+      }
       default:
         throw new Error(`geocoder: ${body.status} ${body.error_message || ''}`.trim());
     }
