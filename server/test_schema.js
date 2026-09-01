@@ -122,5 +122,34 @@ ok('the rollback is commented out, so running the file cannot undo it',
          .every(l => l.trim().startsWith('--')),
    onDisk.split('\n').filter(l => /DROP (COLUMN|INDEX)/.test(l)));
 
+/* Migration 002 is the same file for YOUR table, generated with the environment
+   overrides pointed at client_address. It drifts exactly the same way, so it gets
+   exactly the same test — the first one existing is not a reason to skip the
+   second, it is the reason to expect the second to be needed. */
+const VENTAS_ENV = {
+  ...process.env,
+  STORES_TABLE: 'client_address',
+  STORES_ID_COL: 'ca_id',
+  STORES_NAME_COL: 'address',
+  STORES_CATEGORY_COL: 'city_name',
+  STORES_ADDRESS_COL: 'address',
+};
+const runV = (...args) => execFileSync(process.execPath,
+  [path.join(__dirname, 'print-migration.js'), ...args], { encoding: 'utf8', env: VENTAS_ENV });
+const rollbackV = runV('--rollback').replace(/\n$/, '').split('\n').map(l => '-- ' + l).join('\n');
+const expectedV = (runV() + rollbackV).trimEnd();
+const onDiskV = fs.readFileSync(
+  path.join(__dirname, 'migrations', '002_ventas_client_address_location.sql'), 'utf8').trimEnd();
+ok('002_ventas_client_address_location.sql is what the generator produces today',
+   onDiskV === expectedV,
+   onDiskV === expectedV ? '' : 'regenerate it: see README, "Migration 002"');
+ok('control positive: 002 targets client_address, not the demo table',
+   onDiskV.includes('ALTER TABLE `client_address`') && !onDiskV.includes('ALTER TABLE `stores`'));
+ok('002 names its index after its own table',
+   onDiskV.includes('`client_address_latlng_idx`'));
+ok('002 also keeps its rollback commented out',
+   onDiskV.split('\n').filter(l => /DROP (COLUMN|INDEX)/.test(l))
+          .every(l => l.trim().startsWith('--')));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

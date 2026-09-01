@@ -89,7 +89,12 @@ function makeSchema(overrides = {}, env = process.env) {
     `${q.locationAddress} AS location_address`,
   ].join(', ');
 
-  return { names, q, table: q.table, selectCols, indexName: 'stores_latlng_idx' };
+  /* Derived from the table, not hardcoded: index names are global per schema in
+     MySQL only in the sense that they must be unique per table, but a migration
+     that adds `stores_latlng_idx` to a table called `client_address` is a puzzle
+     for whoever reads it next. For the default table this still produces exactly
+     `stores_latlng_idx`, so migration 001 is unchanged. */
+  return { names, q, table: q.table, selectCols, indexName: `${names.table}_latlng_idx` };
 }
 
 module.exports = { makeSchema, ident, DEFAULTS };

@@ -36,11 +36,16 @@ The selection engine is identical in both modes; only the tiles change.
 ```
 node test-selection.js        # 23 assertions on the selection + clustering engines
 python3 test_ui.py            # 75 assertions driving the real browser + screenshots
-node server/test_schema.js    # 38 assertions on the table/column config (no database)
+node server/test_schema.js    # 42 assertions on the table/column config (no database)
 node server/test_geocoder.js  # 16 assertions on the geocoder (stubbed fetch, no cost)
 node server/test_api.js       # 89 assertions: real Express + real MySQL + real HTTP
 node server/test_batch.js     # 53 assertions on the bulk geocoding run (real MySQL)
+node server/test_ventas.js    # 47 assertions against YOUR schema and YOUR 2,657 rows
 ```
+
+345 assertions. `test_ventas.js` is the one that matters most, because it is the
+only suite whose inputs I did not choose — it runs over your actual data, and every
+correction listed under "Your actual database, measured" below was forced by it.
 
 `test_ui.py` and `test_api.js` both re-implement point-in-polygon independently and assert
 the result matches — so they fail if the UI, the API and the engine ever disagree. Every
@@ -62,6 +67,19 @@ mysql --no-defaults -h 127.0.0.1 -P 13306 -u root crmtest < server/migrations/00
 mysql --no-defaults -h 127.0.0.1 -P 13306 -u root crmtest < server/migrations/001_add_store_location.sql
 npm install && node server/test_api.js && node server/test_batch.js
 ```
+
+`test_ventas.js` needs a database loaded from your dump instead:
+
+```sh
+mysql --no-defaults -h 127.0.0.1 -P 13307 -u root -e "CREATE DATABASE ventas"
+mysql --no-defaults -h 127.0.0.1 -P 13307 -u root ventas < ventas_api.sql
+mysql --no-defaults -h 127.0.0.1 -P 13307 -u root ventas \
+  < server/migrations/002_ventas_client_address_location.sql
+node server/test_ventas.js --port 13307 --db ventas
+```
+
+A second server on a second port, deliberately: running two suites that each hold
+state against one database is how you get a failure that belongs to the other one.
 
 Migration 001 is the one that runs on your VPS; 000 only stands in for the `stores` table
 you already have, so the migration can be proven against a real MySQL 8 before it touches
@@ -214,6 +232,176 @@ The API and batch tests both run their whole flow a second time against a table
 called `tiendas` with columns `id_tienda / nombre / categoria / direccion / lat /
 lng / geo_at / origen / precision_geo` — so "it will fit your schema" is measured,
 not hoped for.
+
+## Your actual database, measured
+
+Everything above this line was written before I had seen your schema. This section
+is written after loading `ventas_api.sql` into a throwaway MySQL 8 and measuring
+it. `server/ventas.js` holds the rules; `server/test_ventas.js` runs them against
+the real rows.
+
+### The shape is different from the demo's in three ways
+
+| The demo assumed | Your database actually has |
+|---|---|
+| a `stores` table | stores are rows in **`clients`**, keyed by `cl_id` |
+| an `address` column on it | the address is on **`client_address`**, one row per client |
+| one address string | four columns: `address`, `city_name`, `state_name`, `country_name` |
+
+`client_address` is strictly 1:1 with `clients` — 2,657 rows each, no client
+without one, and a unique key `uq_client_address (client_id)` that keeps it that
+way. **The location columns therefore go on `client_address`, not on `clients`.**
+That is not a preference: a stale pin is detected by comparing the position
+against the address it was placed for, and a same-row comparison cannot drift out
+of step with a join.
+
+`clients.c_address` also exists, but it is empty on 1,755 of 2,657 rows, so it
+cannot be what the map reads. Where both columns hold something, they agree 868
+times and **disagree 34 times** — different streets, not typos. Those 34 need a
+human decision; nothing in the code guesses.
+
+### Run the report yourself
+
+```sh
+DB_HOST=... DB_USER=... DB_PWD=... DB_NAME=... node server/readiness.js
+```
+
+Every statement in that file is a `SELECT`. It creates nothing, alters nothing and
+writes nothing, so it is safe to point at production — which is the point, because
+a report about a copy is a report about a copy. Output today:
+
+```
+  stores in `clients`                              2657
+  with no row in `client_address`                     0   good
+
+  potential                                        1487
+  active                                           1132
+  inactive                                           38
+  chain                                               0   <- no such category exists
+
+  street + city  -> a real pin                     2104
+  city only      -> a city-centre pin               319
+  neither        -> cannot be pinned                234   <- do not send these to Google
+  one-off cost at $5.00/1,000 requests           $12.12
+```
+
+### The third category does not exist yet
+
+You described three categories — Active, Potential, Chain. The first two are in
+the data: `clients.type` is `ENUM('store','potential')` and `clients.c_status` is
+0/1, which together give **active 1,132 / potential 1,487 / inactive 38**.
+
+**There is no Chain anywhere** — not in the enum, not in the backend, not in the
+frontend. I checked all three rather than assuming. So it has to be defined before
+it can be coloured, and the obvious guesses do not survive contact with the data:
+
+- *Stores sharing a tax ID?* Only 3 groups covering 6 clients. The 1,487 clients
+  that appear to "share" a NIT all share the **empty string** — they are the
+  potentials, which have no NIT yet.
+- *Stores sharing a name?* 129 groups, 267 clients. `Droguería Colsubsidio` ×7,
+  `Líneas Hospitalarias` ×4. This is the more plausible reading, but it also
+  catches `Andres David Gomez Caro` ×2, who is a person entered twice.
+
+Whichever rule you want is a one-line change in `readiness.js` and one more colour
+in the legend. What I will not do is pick one and let the map imply it is a fact.
+
+### 234 addresses cannot be pinned, and 232 of them are the same string
+
+The unpinnable rows are not scattered bad data. They are:
+
+| Count | `address` |
+|---|---|
+| 232 | `1503` |
+| 1 | `Https://Instagram.Com/Branysu_Quiropedia` |
+| 1 | *(empty)* |
+
+`1503` is a sentinel someone used for "unknown". Excluding them is what makes the
+difference between a bill for 2,657 lookups and a bill for 2,423 — small money
+here, but the same discipline is what stops a re-run costing full price every time.
+
+Getting that classifier right took three corrections, each caught by the suite
+running over the real rows rather than over invented ones:
+
+1. It first demanded a usable **city**, which threw away
+   `Calle 45 C Bis # 23 -08 Barrio Palermo` for having `No identificada` in the
+   city field. A good street and a known country is plenty.
+2. It then demanded a **digit**, which threw away 172 named places —
+   `Hospital Universitario San Jose Barrios Unidos`, `Centro Comercial El Tesoro`.
+3. It then still discarded `Mocoa - Putumayo`, `Ciudad Jardin Norte`, `Kennedy`,
+   `Quimbaya`, `Vichada` — real Colombian places sitting in the street field with
+   an empty city. Those pin at town level, which beats not pinning them.
+
+### 24 of your stores are not in Colombia
+
+`country_name` says `Colombia` on all 2,657 rows. But 24 of them carry
+`state_name = 'Internacional'`, with the **country** in `city_name`: Ecuador,
+Chile, Costa Rica, Venezuela, Peru, Panamá, República Dominicana, Paraguay,
+Nicaragua, China, Francia, Italia.
+
+Appending `, Colombia` to `Via G. Buitoni 25, 52037 Sansepolcro, Italia` does not
+fail. It succeeds, and returns a pin in Colombia. A wrong pin that looks right is
+the expensive kind, so `composeAddress()` keys off your own `Internacional` marker
+and drops the country column on those rows.
+
+### One rule, two languages, checked on all 2,657 rows
+
+The address that gets geocoded has to be assembled from four columns. The API
+assembles it in JavaScript; the batch geocoder needs it in SQL to build its
+candidate set without fetching every row. Two implementations of one rule drift —
+so `test_ventas.js` runs **both over every row in the database and compares them
+byte for byte**.
+
+That test is not ceremony. Your columns are `utf8mb4_general_ci`, which is
+accent-insensitive: plain SQL says `Medellín = Medellin` while JavaScript says they
+differ. Left alone, SQL would de-duplicate a city/state pair that JavaScript keeps,
+the two composed strings would differ by one part, and every such row would look
+permanently stale — re-geocoded on every run, forever, for nothing. Every
+comparison in the SQL is wrapped in `CAST(... AS BINARY)` for that reason.
+
+The same test also caught a subtler one: an early version collapsed runs of
+internal whitespace in JavaScript, which SQL's `TRIM` does not do. `CL 108  80 60`
+composed one way in the API and another in the batch. The collapsing is gone —
+agreement matters more than tidiness, and the geocoder does not care about double
+spaces.
+
+### Migration 002
+
+```sh
+mysql -u <user> -p <db> < server/migrations/002_ventas_client_address_location.sql
+```
+
+Same six columns as 001, pointed at `client_address`. Generated, not hand-written:
+
+```sh
+STORES_TABLE=client_address STORES_ID_COL=ca_id STORES_NAME_COL=address \
+STORES_CATEGORY_COL=city_name STORES_ADDRESS_COL=address \
+  node server/print-migration.js > server/migrations/002_ventas_client_address_location.sql
+STORES_TABLE=client_address STORES_ID_COL=ca_id STORES_NAME_COL=address \
+STORES_CATEGORY_COL=city_name STORES_ADDRESS_COL=address \
+  node server/print-migration.js --rollback | sed 's/^/-- /' \
+  >> server/migrations/002_ventas_client_address_location.sql
+```
+
+`test_schema.js` compares the committed file against what the generator produces
+right now, and fails with that command in the message if they differ. Both 001 and
+002 get this, because a generated file that is committed **will** drift from its
+generator, and the tests build their database from the committed file — so the
+suite and the test database agree with each other and both disagree with the code.
+Everything green, broken on your server.
+
+It has been applied to a copy of your real `client_address` table (all 2,657 rows)
+on MySQL 8.0.45, and the columns and index verified afterwards with `SHOW COLUMNS`
+and `SHOW INDEX`. Still run it on staging first — a branch cannot undo a schema
+change.
+
+### Notes for whoever reviews the PR
+
+Five separate code paths write `client_address`: `addClient`, `updateClient`,
+the Excel importer, the Siigo sync in `inngest/functions.js`, and
+`orderControllers.js`. **None of them needs to change.** Staleness is detected by
+comparing the stored `location_address` against the current address, so whichever
+path edits the address, the map notices — rather than five hooks, one of which
+someone forgets.
 
 ## Geocoding 2,000 addresses
 
