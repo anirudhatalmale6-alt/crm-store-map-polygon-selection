@@ -36,6 +36,7 @@ The selection engine is identical in both modes; only the tiles change.
 ```
 node test-selection.js        # 23 assertions on the selection + clustering engines
 python3 test_ui.py            # 75 assertions driving the real browser + screenshots
+python3 test_gmaps_surface.py # 20 assertions on the GOOGLE surface, with no API key
 node server/test_schema.js    # 42 assertions on the table/column config (no database)
 node server/test_geocoder.js  # 16 assertions on the geocoder (stubbed fetch, no cost)
 node server/test_api.js       # 89 assertions: real Express + real MySQL + real HTTP
@@ -43,9 +44,12 @@ node server/test_batch.js     # 53 assertions on the bulk geocoding run (real My
 node server/test_ventas.js    # 47 assertions against YOUR schema and YOUR 2,657 rows
 ```
 
-345 assertions. `test_ventas.js` is the one that matters most, because it is the
+365 assertions. `test_ventas.js` is the one that matters most, because it is the
 only suite whose inputs I did not choose — it runs over your actual data, and every
 correction listed under "Your actual database, measured" below was forced by it.
+
+`test_gmaps_surface.py` is the newest, and it exists because of a bug that all of the
+others missed — see "The polygon tool was broken on the real map" below.
 
 `test_ui.py` and `test_api.js` both re-implement point-in-polygon independently and assert
 the result matches — so they fail if the UI, the API and the engine ever disagree. Every
@@ -512,3 +516,164 @@ component reconciling against the store list it gets from the API, rather than b
 individual events at it. That's why the demo's marker layer diffs by store id: a store that
 vanishes from the payload has its marker torn down, one that moved has its position set, and
 a new one gets a marker created. No stale markers, no duplicate pins after an edit.
+
+## The polygon tool was broken on the real map
+
+Your screenshot showed the demo with the Google basemap loaded, pins on it, and the
+header still reading **offline preview**. The badge was the visible end of a real
+defect.
+
+`GoogleSurface.init()` created a `google.maps.drawing.DrawingManager`. Google
+**removed** DrawingManager in Maps JavaScript API v3.65. A removal is not a console
+warning that can be ignored — the constructor throws, and the throw aborted the rest
+of `init()`. Everything above the throw ran, so the map appeared and looked healthy.
+Everything below it silently did not:
+
+- the `idle` listener, so **clusters stopped re-computing when you zoomed**;
+- the `polygoncomplete` handler, so **polygon drawing did not work at all** — which
+  is milestone 4, the whole point of the feature;
+- the two lines that flip the badge and the banner, which is the part you could see.
+
+The pins in your screenshot came from unticking **Active** — that re-runs the render
+independently, which is why the map looked like it was working.
+
+**What changed.** Drawing is now done directly against the map: click each corner,
+then **Finish polygon**; drag a corner afterwards and the selection updates as you
+drag. That is the same gesture as the offline preview, instead of two different ones
+depending on whether a key is loaded, and it drops the `libraries=drawing` request
+from the API URL entirely.
+
+One subtlety worth knowing, because it is the kind of thing that bites later: the
+overlay is only rebuilt when the shape actually changes. Dragging a corner fires an
+event that re-renders the map, and a redraw-every-time implementation would destroy
+the very overlay your mouse is holding, halfway through the drag.
+
+### Why no test caught it
+
+Every browser test drove the offline preview. The Google surface needs an API key, a
+key costs money and cannot live in a repository, so it was never exercised — and
+"we cannot test this" had quietly turned into "this does not work".
+
+`test_gmaps_surface.py` fixes that with a stub of `google.maps`: about sixty lines
+implementing the handful of classes the demo uses. That runs the **real** `init()`,
+the **real** render and the **real** drawing code in a real browser, with no key, no
+network and no bill.
+
+The load-bearing detail is what the stub leaves out. It implements only what Google
+currently documents, so it has no `google.maps.drawing` — because Google has no
+`google.maps.drawing`. Reach for a retired API again and the suite fails. A stub
+built to match whatever the page happened to call would have passed against
+DrawingManager too, and been worth nothing. I checked that it discriminates by
+putting the old line back: the suite fails, and passes again when removed.
+
+What it does **not** prove: that your key is valid, that your referrer restrictions
+are right, or that Google's tiles render. Those need a real key on the real domain.
+
+`google.maps.Marker` is also deprecated (since Feb 2024) in favour of
+`AdvancedMarkerElement`. Google says it is *not* scheduled for removal, so it still
+works — but DrawingManager was "deprecated" once too, so it is written down here
+rather than left as a surprise.
+
+## What Google can actually find: measured, not estimated
+
+`readiness.js` can say an address is worth **sending**. It cannot say Google will
+**find** it. Colombian addresses are cadastral (`CR 70 C 55 33`), not
+street-name-and-number, and geocoders are measurably worse at those. So rather than
+guess, `geocode-sample.js` sends a random sample and counts.
+
+```sh
+GOOGLE_KEY=... node server/geocode-sample.js --socket /var/run/mysqld/mysqld.sock \
+    --db ventas --n 50 --save sample.json
+node server/geocode-sample.js --regrade sample.json     # re-score, free
+node server/geocode-sample.js --dry-run                 # see what would be sent, costs nothing
+```
+
+Read-only against your database: it writes no columns, so it is safe to point at
+production and safe to run twice. Result on 50 of your real addresses, $0.25:
+
+```
+  exact (rooftop or interpolated)     39   78%
+  approximate (right city, coarse)     9   18%
+  WRONG PLACE (looks fine, isn't)      2    4%
+  not found                            0    0%
+  usable pins                         48   96%
+```
+
+96%, extrapolating to roughly **2,326 pins of the 2,423 sendable rows** for $12.12.
+The cadastral-address worry was worth having and turned out not to matter.
+
+**"Google returned a result" is not the number to report.** A geocoder answers
+something for almost any input: hand it a string it cannot parse and it will return
+the centre of the department with status `OK`. A pin in the wrong place looks
+exactly like a pin in the right place, and is worse than a missing one because
+nobody goes looking for it. So every result is checked against what was *asked* for
+— country, then city — and graded on that, not on the HTTP status.
+
+The two wrong ones are both **data**, not Google:
+
+- `Calle 14 # 9 -93 Sogamoso Boyaca` with the city column set to Bogotá. Google
+  returned Sogamoso, which is what the street text says. Google was right.
+- `Cra 3 #15 A-24 Serrezuelita, Mosquera` came back in Funza, the next municipality.
+
+### I got this measurement wrong first
+
+The first run of that script reported **16% in the wrong place**. Six of those eight
+were correct pins my own comparison had misread: it compared place names with `===`,
+so `Bogota D.C.` did not match Google's `Bogotá`, and `Bogotá` did not match Google's
+`Bogotá, D.C.`. Sending that number on would have told you your address data was
+twice as bad as it is.
+
+Names are now compared as token sets with the administrative noise words dropped, so
+both reduce to `{bogota}`. Two further rules came out of the same review:
+
+- On the `Internacional` rows the **country** is what somebody typed into the *city*
+  column, so that is what it has to be checked against. Comparing "Ecuador" to
+  Google's "Daule" scored correct Ecuadorian pins as failures.
+- "The country column disagrees" is not a bad pin. That column reads Colombia on all
+  2,657 rows, so it cannot disagree with anything meaningfully. Three sampled stores
+  came back in Ecuador and Venezuela — correctly. That is now reported as
+  information, not counted as a failure.
+
+Because the run costs money and the grading rules turned out to be wrong, every raw
+response is saved with `--save` and can be re-scored with `--regrade` for free. I am
+not paying Google twice for answers I already have.
+
+## Your other three points, measured
+
+**Consumers with no address.** They are already excluded, and cannot be included:
+`consumers` is a separate table of 8,017 rows whose columns are id, name, NIT, email,
+phone, sales rep and site — there is no address column at all. The map reads
+`clients`, so nothing needs skipping.
+
+**Subsidiaries.** This is the one to look at, because today the database *cannot*
+store one. `client_address` has a unique key on `client_id`, so one client has
+exactly one address, enforced — 2,657 clients, 2,657 addresses, no exceptions. A
+subsidiary can only exist as a **separate client row**, and that is what is
+happening: 129 groups of clients share a name (267 clients), and 96 of those groups
+sit at different street addresses, 39 of them in more than one city. `Droguería
+Colsubsidio` is 7 clients at 7 addresses in 4 cities.
+
+That works fine for the map — each branch is its own row with its own pin. It only
+matters for what "Chain" means, and for one thing worth knowing: shared **NIT**
+identifies only 3 groups (6 clients), so the tax ID is not currently how branches are
+linked. Name is the only signal in the data today.
+
+(Also worth a moment: 129 groups share a name accent-insensitively, but only 104
+match byte for byte. The 25-group gap is the same business typed twice with different
+accents or capitalisation — `Drogueria` and `Droguería`.)
+
+**The 34 conflicting addresses.** These are not subsidiaries — they are one client
+with two *columns* disagreeing, `clients.c_address` against
+`client_address.address`. The pattern is clear once they are lined up: `c_address` is
+cadastral shorthand with no punctuation (`CR 2 46 13`), and `client_address.address`
+is typed by a human with the unit and the neighbourhood (`CR 2 # 46 - 13`,
+`Cc el puente local 168 calle 10 12-184`). About 13 of the 34 are the same place
+written two ways; the other 21 are genuinely different, and the second column is
+consistently the commercial premises — `local 13`, `local 114`, `pasaje comercial`,
+`cc bulevar niza` — while the first looks like the registered address of the person
+or company. Your `siigo_sync` table (9,571 rows) is very likely where the first one
+comes from.
+
+For a **store map** you want where the shop is, which is `client_address` — the
+column the location data is being added to. Still your call, but that is what the
+data says, and the full list of 34 is one query away if you want to eyeball it.

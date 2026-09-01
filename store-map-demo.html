@@ -782,34 +782,66 @@ const OfflineSurface = (() => {
 
 /* --- 4b. Google Maps surface (needs the client's API key) --- */
 const GoogleSurface = (() => {
-  let map, markers = new Map(), gPoly = null, drawMgr = null;
+  let map, markers = new Map(), gPoly = null, polySig = null;
 
   function init() {
     map = new google.maps.Map($('gmap'), {
       center: { lat: 40.4200, lng: -3.7020 }, zoom: 13, mapTypeControl: false,
       streetViewControl: false, fullscreenControl: false,
     });
-    drawMgr = new google.maps.drawing.DrawingManager({
-      drawingControl: false,
-      polygonOptions: { fillColor:'#4f9dff', fillOpacity:.14, strokeColor:'#4f9dff', strokeWeight:2 },
-    });
-    drawMgr.setMap(map);
     // Clustering depends on zoom, so re-cluster whenever the view settles.
     google.maps.event.addListener(map, 'idle', render);
-    google.maps.event.addListener(drawMgr, 'polygoncomplete', p => {
-      if (gPoly) gPoly.setMap(null);
-      gPoly = p;
-      drawMgr.setDrawingMode(null);
-      drawing = false;
-      const readPath = () => {
-        polygon = p.getPath().getArray().map(ll => ({ lat: ll.lat(), lng: ll.lng() }));
-        recompute();
-      };
-      ['set_at','insert_at','remove_at'].forEach(ev =>
-        google.maps.event.addListener(p.getPath(), ev, readPath));
-      readPath();
+
+    /* Polygon drawing, done by hand rather than with google.maps.drawing.
+     *
+     * This used to be a DrawingManager. Google REMOVED DrawingManager in Maps
+     * JavaScript API v3.65, and removal is not a warning in the console — the
+     * constructor throws, which aborted the rest of this function. The map still
+     * appeared, so it looked like it worked; what silently died was everything
+     * below the throw: the idle listener (so clusters stopped updating on zoom)
+     * and polygon drawing itself, which is the entire feature.
+     *
+     * Drawing our own has a second advantage worth having anyway: the click-a-
+     * point interaction is now IDENTICAL to the offline preview, instead of two
+     * different gestures depending on whether a key is present. */
+    google.maps.event.addListener(map, 'click', e => {
+      if (!drawing) return;
+      polygon.push({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+      recompute();
     });
     render();
+  }
+
+  /* Draw the polygon the user is building, and keep it editable once closed.
+     Called from render(), so the shape survives every re-cluster and re-render. */
+  function drawPolygon() {
+    /* Rebuild ONLY when the shape actually changed.
+       Dragging a vertex fires set_at -> readPath -> recompute -> render, so a
+       drawPolygon that rebuilt unconditionally would destroy the very overlay the
+       user has hold of, halfway through the drag. After readPath, `polygon` already
+       equals what is on screen, so the signature matches and nothing is touched. */
+    const sig = drawing + '|' + polygon.map(p => p.lat.toFixed(7) + ',' + p.lng.toFixed(7)).join(';');
+    if (sig === polySig) return;
+    polySig = sig;
+    if (gPoly) { gPoly.setMap(null); gPoly = null; }
+    if (polygon.length < 2) return;
+    const shared = { strokeColor: '#4f9dff', strokeWeight: 2, clickable: false, map };
+    gPoly = drawing
+      // While drawing, an open polyline: a filled shape that closes itself on every
+      // click misrepresents what has actually been selected so far.
+      ? new google.maps.Polyline({ ...shared, path: polygon })
+      : new google.maps.Polygon({ ...shared, paths: polygon, fillColor: '#4f9dff', fillOpacity: .14,
+                                  editable: true });
+    if (!drawing) {
+      /* Dragging a vertex has to feed straight back into the selection, or the
+         shape on screen and the list on the right stop describing each other. */
+      const readPath = () => {
+        polygon = gPoly.getPath().getArray().map(ll => ({ lat: ll.lat(), lng: ll.lng() }));
+        recompute();
+      };
+      ['set_at', 'insert_at', 'remove_at'].forEach(ev =>
+        google.maps.event.addListener(gPoly.getPath(), ev, readPath));
+    }
   }
 
   /* Screen-space cluster grid, expressed in degrees.
@@ -828,6 +860,7 @@ const GoogleSurface = (() => {
 
   function render() {
     if (!map) return;
+    drawPolygon();
     const vis = visibleStores();
     const d = degPerPx();
     let groups;
@@ -919,16 +952,12 @@ const GoogleSurface = (() => {
   return {
     init, render,
     show()   { $('gmap').style.display = 'block'; $('offline').style.display = 'none'; },
-    startDraw() {
-      if (gPoly) { gPoly.setMap(null); gPoly = null; }
-      polygon = []; drawing = true; recompute();
-      drawMgr.setDrawingMode(google.maps.drawing.OverlayType.POLYGON);
-    },
-    endDraw() { drawMgr.setDrawingMode(null); drawing = false; recompute(); },
-    clear()   {
-      if (gPoly) { gPoly.setMap(null); gPoly = null; }
-      drawMgr.setDrawingMode(null); polygon = []; drawing = false; recompute();
-    },
+    /* The cursor is the only signal that the map is armed. Without it, a user who
+       has clicked "Draw polygon" and is looking at the map has nothing telling them
+       the next click places a corner rather than doing nothing. */
+    startDraw() { polygon = []; drawing = true; if (map) map.setOptions({ draggableCursor: 'crosshair' }); recompute(); },
+    endDraw()   { drawing = false; if (map) map.setOptions({ draggableCursor: null }); recompute(); },
+    clear()     { polygon = []; drawing = false; if (map) map.setOptions({ draggableCursor: null }); recompute(); },
     center()  { const c = map.getCenter(); return { lat: c.lat(), lng: c.lng() }; },
   };
 })();
@@ -995,7 +1024,7 @@ $('loadGoogle').onclick = () => {
   const key = $('apiKey').value.trim();
   if (!key) { alert('Paste your Google Maps JavaScript API key first.'); return; }
   const s = document.createElement('script');
-  s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&libraries=drawing&callback=__gmapReady`;
+  s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&callback=__gmapReady`;
   s.onerror = () => alert('Could not load Google Maps - check the key and its HTTP referrer restrictions.');
   document.head.appendChild(s);
 };
@@ -1004,7 +1033,8 @@ window.__gmapReady = () => {
   surface.show();
   GoogleSurface.init();
   $('modeTag').textContent = 'Google Maps';
-  $('banner').textContent = 'Live Google Maps basemap. Draw polygon → click points on the map, click the first point again to close.';
+  $('banner').textContent = 'Live Google Maps basemap. Draw polygon → click each corner on the map, ' +
+                            'then Finish polygon. Drag a corner afterwards to adjust the selection.';
   polygon = []; drawing = false;
   recompute();
   log('Google Maps loaded');

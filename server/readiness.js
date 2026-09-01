@@ -24,13 +24,27 @@ function arg(name, fallback) {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
 
-const CONF = {
-  host: arg('host', process.env.DB_HOST || '127.0.0.1'),
-  port: Number(arg('port', process.env.DB_PORT || 3306)),
-  user: arg('user', process.env.DB_USER || 'root'),
-  password: arg('pwd', process.env.DB_PWD || ''),
-  database: arg('db', process.env.DB_NAME || 'ventas'),
-};
+/* A unix socket is not a nicety: on a server where MySQL only listens locally —
+   which is how it should be configured, and how many shared hosts ship it — TCP to
+   127.0.0.1 is refused and the socket is the only way in. When one is given, host
+   and port are meaningless, so they are dropped rather than printed as if they
+   described the connection. */
+const SOCKET = arg('socket', process.env.DB_SOCKET || '');
+const CONF = SOCKET
+  ? {
+      socketPath: SOCKET,
+      user: arg('user', process.env.DB_USER || 'root'),
+      password: arg('pwd', process.env.DB_PWD || ''),
+      database: arg('db', process.env.DB_NAME || 'ventas'),
+    }
+  : {
+      host: arg('host', process.env.DB_HOST || '127.0.0.1'),
+      port: Number(arg('port', process.env.DB_PORT || 3306)),
+      user: arg('user', process.env.DB_USER || 'root'),
+      password: arg('pwd', process.env.DB_PWD || ''),
+      database: arg('db', process.env.DB_NAME || 'ventas'),
+    };
+const WHERE = SOCKET ? `socket ${SOCKET}` : `${CONF.host}:${CONF.port}`;
 const AS_JSON = process.argv.includes('--json');
 
 const { q } = ventasSchema();
@@ -71,7 +85,7 @@ const row = (label, value, note = '') => {
 
   try {
     if (!AS_JSON) {
-      console.log(`Address readiness report — ${CONF.database} on ${CONF.host}:${CONF.port}`);
+      console.log(`Address readiness report — ${CONF.database} on ${WHERE}`);
       console.log('Read-only: this script runs SELECTs and nothing else.');
     }
 
