@@ -291,6 +291,59 @@ with sync_playwright() as p:
     ok("control positive: a redraw that DOES change something still repaints",
        page.evaluate("window.__calls") > 0, page.evaluate("window.__calls"))
 
+    # ---------- one pin shape per category ----------
+    # "Is it possible to predefine pins according to categories, as we have today"
+    # - their published My Maps uses a different icon per store type. A category that
+    # forgot its glyph draws a blank teardrop, which reads as a category of its own.
+    glyphs = page.evaluate("""() => {
+      const all = [...REAL_CATEGORIES, ...DEMO_CATEGORIES];
+      return { missing: all.filter(c => !c.glyph || !c.glyph.d).map(c => c.id),
+               dupColour: [...new Set(REAL_CATEGORIES.map(c => c.color))].length,
+               dupGlyph: [...new Set(REAL_CATEGORIES.map(c => c.glyph.d))].length,
+               n: REAL_CATEGORIES.length };
+    }""")
+    ok("every category in both palettes carries its own pin glyph",
+       glyphs["missing"] == [], glyphs["missing"])
+    # Differentiating BY category is the whole requirement, so two categories sharing
+    # a shape or a colour is a silent failure of it, not a cosmetic slip.
+    ok("...and no two categories share a colour or a shape",
+       glyphs["dupColour"] == glyphs["n"] and glyphs["dupGlyph"] == glyphs["n"], glyphs)
+
+    n_dot = page.evaluate("window.__stub.markers.filter(m => !m._gone).length")
+    page.evaluate("() => { window.__calls = 0; }")
+    page.check("#iconBox")
+    ok("switching to icon pins actually repaints the markers",
+       page.evaluate("window.__calls") > 0, page.evaluate("window.__calls"))
+    # The trap this guards: render() skips any marker whose signature is unchanged, so
+    # leaving pinStyle out of that signature makes the toggle a control that does
+    # nothing. The count above is 0 in exactly that case.
+    ok("...without inventing or losing a single pin",
+       page.evaluate("window.__stub.markers.filter(m => !m._gone).length") == n_dot,
+       f"{n_dot} -> {page.evaluate('window.__stub.markers.filter(m => !m._gone).length')}")
+
+    pin = page.evaluate("""() => {
+      const m = window.__stub.markers.filter(m => !m._gone)
+                  .find(m => m.icon && typeof m.icon.url === 'string');
+      if (!m) return null;
+      const svg = decodeURIComponent(m.icon.url.split(',')[1]);
+      const cat = REAL_CATEGORIES.concat(DEMO_CATEGORIES)
+                    .find(c => svg.includes('fill="' + c.color + '"'));
+      return { svg, anchorY: m.icon.anchor.y, h: m.icon.scaledSize.height,
+               glyph: cat ? svg.includes(cat.glyph.d) : false };
+    }""")
+    ok("a single store is drawn as its category's teardrop, glyph included",
+       pin is not None and pin["glyph"] is True, pin and pin["svg"][:80])
+    # A teardrop anchored at its centre floats half a pin north of the store. The tip
+    # is at y=23 of the 24-box, so the anchor has to be near the bottom of the icon.
+    ok("...anchored on its point, not its middle",
+       pin is not None and pin["anchorY"] > pin["h"] * 0.85,
+       pin and (pin["anchorY"], pin["h"]))
+    page.uncheck("#iconBox")
+    ok("turning icon pins back off restores the dot style",
+       page.evaluate("""() => window.__stub.markers.filter(m => !m._gone)
+           .every(m => !m.icon || typeof m.icon.url !== 'string'
+                       || m.icon.url.includes('circle'))""") is True)
+
     # ---------- a half-initialised map must not look like a working one ----------
     # Google builds the basemap first and everything we add to it second, so a throw
     # in the second half leaves the tiles on screen with the features behind them

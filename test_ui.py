@@ -432,6 +432,29 @@ with sync_playwright() as p:
     print(f'       ({sel_count} of 2,000 selected · select {perf["selectMs"]} ms · '
           f'draw {perf["renderMs"]} ms · {cl["groups"]} clusters)')
 
+    # ---------- icon pins on the offline surface ----------
+    # Same toggle, same shapes as the Google surface. The thing that can quietly break
+    # here is the handle: pins are dragged by looking the store up from data-sid, so a
+    # pin drawn without one is a pin nobody can move any more.
+    page.uncheck("#clusterBox")
+    page.uncheck("#reviewBox")
+    singles = page.evaluate("visibleStores().length")
+    page.check("#iconBox")
+    icons = page.evaluate("""() => {
+      const g = [...document.querySelectorAll('#offline svg g.pin')];
+      return { n: g.length, sid: g.every(e => e.dataset.sid),
+               paths: g.length ? g[0].querySelectorAll('path').length : 0 };
+    }""")
+    ok("icon mode draws one teardrop per visible store", icons["n"] == singles,
+       f'{icons["n"]} pins for {singles} stores')
+    ok("...each still carrying the id that makes it draggable", icons["sid"] is True)
+    ok("...and each is a body plus its category glyph, not a bare shape",
+       icons["paths"] == 2, icons["paths"])
+    shot("6-icon-pins.png")
+    page.uncheck("#iconBox")
+    ok("turning it off puts the dots back",
+       page.evaluate("document.querySelectorAll('#offline svg g.pin').length") == 0)
+
     ok("no uncaught javascript errors on the page", not errors, errors)
     browser.close()
 

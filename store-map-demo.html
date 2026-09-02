@@ -99,6 +99,12 @@
     <div class="section">
       <h2>Store categories</h2>
       <div class="legend" id="legend"></div>
+      <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;margin-top:10px">
+        <input type="checkbox" id="iconBox"> Icon pins instead of dots
+      </label>
+      <p class="hint">Each category carries its own pin shape, the way the layers on your
+         My Maps do. Clusters keep the ring, because a bubble of 40 stores has no single
+         icon to show.</p>
     </div>
 
     <div class="section">
@@ -305,15 +311,26 @@ const REAL = (!FORCE_DEMO && typeof window !== 'undefined' && window.__STORE_DAT
    up. A category with an invented rule behind it is worse than a missing one,
    because on a map it looks just as authoritative. Adding it later is one line
    in export-map-data.js. */
+/* `glyph` is the shape drawn inside the teardrop pin, in a 24x24 box, so a category
+   carries its own icon as DATA. Adding the store types you use on My Maps today
+   (drugstore, orthopaedic, supermarket, ...) is then a row here plus the column in
+   the database that says which one a store is - not a change to the drawing code.
+   `filled:false` means the path is stroked, which stays legible at 30px. */
+const GLYPH = {
+  bag:   { d:'M8 10.6h8l-.7 6.4H8.7l-.7-6.4z M10.2 10.6V9.3a1.8 1.8 0 0 1 3.6 0v1.3' },
+  star:  { d:'M12 7.1l1.53 3.1 3.42.5-2.475 2.41.585 3.41L12 14.91l-3.06 1.61.585-3.41L7.05 10.7l3.42-.5L12 7.1z', filled:true },
+  cross: { d:'M9.3 8.3l5.4 5.4 M14.7 8.3l-5.4 5.4' },
+  chain: { d:'M10.6 13.4l2.8-2.8 M9.9 11.3l-1 1a2.1 2.1 0 0 0 3 3l1-1 M14.1 12.7l1-1a2.1 2.1 0 0 0-3-3l-1 1' },
+};
 const REAL_CATEGORIES = [
-  { id:'active',    label:'Active store',   color:'#3ddc97' },
-  { id:'potential', label:'Potential',      color:'#ffb454' },
-  { id:'inactive',  label:'Inactive store', color:'#8b97a6' },
+  { id:'active',    label:'Active store',   color:'#3ddc97', glyph:GLYPH.bag },
+  { id:'potential', label:'Potential',      color:'#ffb454', glyph:GLYPH.star },
+  { id:'inactive',  label:'Inactive store', color:'#8b97a6', glyph:GLYPH.cross },
 ];
 const DEMO_CATEGORIES = [
-  { id:'active',    label:'Active',    color:'#3ddc97' },
-  { id:'potential', label:'Potential', color:'#ffb454' },
-  { id:'chain',     label:'Chain',     color:'#4f9dff' },
+  { id:'active',    label:'Active',    color:'#3ddc97', glyph:GLYPH.bag },
+  { id:'potential', label:'Potential', color:'#ffb454', glyph:GLYPH.star },
+  { id:'chain',     label:'Chain',     color:'#4f9dff', glyph:GLYPH.chain },
 ];
 const CATEGORIES = REAL ? REAL_CATEGORIES : DEMO_CATEGORIES;
 const catById = Object.fromEntries(CATEGORIES.map(c => [c.id, c]));
@@ -373,6 +390,24 @@ function mixRing(cx, cy, r, mix, w) {
 /* "75 stores · 60 Active store, 15 Potential" - the numbers behind the ring, for
    anyone who wants the exact split rather than the proportions. */
 const mixLabel = mix => mix.map(m => `${m.count} ${catById[m.id].label}`).join(', ');
+
+/* The teardrop used by "icon" pin style, matching the shape My Maps uses. Drawn in a
+   24x24 box with the point at (12,23), so both surfaces anchor it the same way: on
+   Google the anchor is the tip, offline the <g> is translated by the same offset.
+   A pin whose position Google was unsure about is drawn hollow - dark body, category
+   colour on the outline AND on the glyph - so the category is still readable and the
+   pin is still obviously unfinished, exactly as the dot style does it. */
+const PIN_PATH = 'M12 1.4c-4.42 0-8 3.58-8 8 0 5.9 8 13.6 8 13.6s8-7.7 8-13.6c0-4.42-3.58-8-8-8z';
+function pinSvg(cat, o = {}) {
+  const body = o.hollow ? '#141a21' : cat.color;
+  const ink = o.hollow ? cat.color : '#0f1216';
+  const g = cat.glyph;
+  return `<path d="${PIN_PATH}" fill="${body}" stroke="${o.stroke || '#0f1216'}"
+            stroke-width="${o.weight == null ? 1.4 : o.weight}"/>` +
+    (g ? `<path d="${g.d}" fill="${g.filled ? ink : 'none'}"
+            stroke="${g.filled ? 'none' : ink}" stroke-width="1.9"
+            stroke-linecap="round" stroke-linejoin="round"/>` : '');
+}
 /* Red, and used nowhere else: a pin in the wrong country is not a shade of
    "imprecise", it is the one kind of error that is simply wrong. */
 const WRONG_COLOR = '#ff6b6b';
@@ -488,6 +523,10 @@ let selectedIds = new Set();
 let drawing = false;
 let hidden = new Set(); // category ids toggled off
 let reviewOnly = false;  // show only the pins Google was unsure about
+/* Default is the dot style this map already shipped with: turning icons on is the new
+   behaviour, so it has to be asked for. A new default that redraws every pin would be
+   a change nobody requested. */
+let pinStyle = 'dot';    // 'dot' | 'icon'
 let clustering = true;  // merge nearby pins into a numbered bubble
 const CELL_PX = 48;     // cluster grid size in screen pixels
 
@@ -535,10 +574,14 @@ function recompute() {
 function renderLegend() {
   const counts = {};
   stores.forEach(s => counts[s.cat] = (counts[s.cat] || 0) + 1);
+  // The swatch shows the pin the map is actually drawing right now, so the legend
+  // cannot claim a dot while the map shows an icon.
   $('legend').innerHTML = CATEGORIES.map(c => `
     <label>
       <input type="checkbox" data-cat="${c.id}" ${hidden.has(c.id) ? '' : 'checked'}>
-      <span class="dot" style="background:${c.color}"></span>
+      ${pinStyle === 'icon'
+        ? `<svg width="15" height="15" viewBox="0 0 24 24" style="flex:none">${pinSvg(c)}</svg>`
+        : `<span class="dot" style="background:${c.color}"></span>`}
       <span>${c.label}</span>
       <span class="count">${counts[c.id] || 0}</span>
     </label>`).join('');
@@ -815,6 +858,32 @@ const OfflineSurface = (() => {
         // A pin whose address was edited gets an amber ring: it is not vague, it is
         // provably on the wrong street until somebody re-geocodes or confirms it.
         const stale = isStale(s);
+        if (pinStyle === 'icon') {
+          // k scales the 24-box; the pin is translated so its POINT lands on the
+          // store's coordinates, not its centre - a teardrop that is centred sits
+          // half a pin north of where the store actually is.
+          const k = on ? 1.5 : 1.15;
+          const cat = catById[s.cat];
+          return `<g>
+            ${stale ? `<circle class="ring" data-sid="${s.id}" cx="${g.x}" cy="${g.y}" r="${5 * k}"
+                               fill="none" stroke="${STALE_COLOR}" stroke-width="2"
+                               pointer-events="none"/>` : ''}
+            ${isWrongPlace(s) ? `<circle class="ring" data-sid="${s.id}" cx="${g.x}" cy="${g.y}"
+                               r="${7 * k}" fill="none" stroke="${WRONG_COLOR}"
+                               stroke-width="2.5" pointer-events="none"/>` : ''}
+            <g class="pin" data-sid="${s.id}"
+               transform="translate(${g.x - 12 * k} ${g.y - 23 * k}) scale(${k})"
+               opacity="${on ? 1 : .92}">
+              ${pinSvg(cat, { hollow: vague, stroke: on ? '#fff' : '#0f1216',
+                              weight: on ? 2.2 : 1.4 })}
+            </g>
+            ${s.src === 'manual'
+              ? `<circle class="pin" data-sid="${s.id}" cx="${g.x}" cy="${g.y}" r="2"
+                         fill="#0f1216" pointer-events="none"/>` : ''}
+            ${on && showLabels ? `<text x="${g.x + 13}" y="${g.y + 4}" fill="#e6ebf1"
+                          font-size="11">${esc(s.name)}</text>` : ''}
+          </g>`;
+        }
         return `<g>
           ${stale ? `<circle class="ring" data-sid="${s.id}" cx="${g.x}" cy="${g.y}"
                              r="${on ? 13 : 10}" fill="none" stroke="${STALE_COLOR}"
@@ -834,7 +903,7 @@ const OfflineSurface = (() => {
             ? `<circle class="pin" data-sid="${s.id}" cx="${g.x}" cy="${g.y}" r="2.4"
                        fill="#0f1216" pointer-events="none"/>` : ''}
           ${on && showLabels ? `<text x="${g.x + 13}" y="${g.y + 4}" fill="#e6ebf1"
-                        font-size="11">${s.name}</text>` : ''}
+                        font-size="11">${esc(s.name)}</text>` : ''}
         </g>`;
       }
       const mix = clusterMix(g.items, CATEGORIES);
@@ -1095,7 +1164,23 @@ const GoogleSurface = (() => {
       /* A mixed bubble is drawn as a data-URI SVG rather than a SymbolPath circle,
          because a symbol takes ONE fill and the whole point here is that it holds
          more than one category. Same mixRing() as the offline preview. */
-      const icon = !pure ? (() => {
+      /* Icon style, single store: the same teardrop the offline preview draws, handed
+         to Google as a data-URI. anchor is the POINT of the pin (12,23 in the 24-box,
+         scaled), so the pin hangs above its coordinates instead of straddling them. */
+      const iconPin = (single && pinStyle === 'icon') ? (() => {
+        const k = selIn ? 1.9 : 1.5, D = Math.ceil(24 * k);
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${D}" height="${D}" ` +
+          `viewBox="0 0 24 24">` +
+          pinSvg(catById[s.cat], { hollow: vague,
+                                   stroke: stale ? STALE_COLOR : (selIn ? '#ffffff' : '#0f1216'),
+                                   weight: stale ? 2.6 : (selIn ? 2 : 1.2) }) + `</svg>`;
+        return { url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg),
+                 scaledSize: new google.maps.Size(D, D),
+                 anchor: new google.maps.Point(D / 2, 23 * k),
+                 labelOrigin: new google.maps.Point(D / 2, 9.4 * k) };
+      })() : null;
+
+      const icon = iconPin ? iconPin : !pure ? (() => {
         const D = Math.ceil((scale + 3) * 2);
         const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${D}" height="${D}">` +
           `<circle cx="${D / 2}" cy="${D / 2}" r="${scale}" fill="${MIXED_FILL}" ` +
@@ -1144,7 +1229,10 @@ const GoogleSurface = (() => {
          handful of bubbles actually flip selection state; the rest are now left
          alone, which is the difference between the SDK repainting the map and the
          SDK repainting one bubble. */
-      const sig = [pos.lat, pos.lng, colour, scale, selIn, g.count, canDrag,
+      /* pinStyle belongs in here for the same reason everything else does: the diff
+         below skips any marker whose signature is unchanged, so a property left out
+         of it is a control that appears to do nothing. */
+      const sig = [pinStyle, pos.lat, pos.lng, colour, scale, selIn, g.count, canDrag,
                    vague, stale, mix.map(x => x.id + ':' + x.count).join(','), title].join('|');
 
       let m = markers.get(key);
@@ -1204,6 +1292,11 @@ $('drawBtn').onclick = () => {
 $('clearBtn').onclick = () => { surface.clear(); $('drawBtn').textContent = 'Draw polygon'; };
 
 $('clusterBox').onchange = e => { clustering = e.target.checked; recompute(); };
+$('iconBox').onchange = e => {
+  pinStyle = e.target.checked ? 'icon' : 'dot';
+  renderLegend();   // the swatches have to follow the map
+  recompute();
+};
 $('undoBtn').onclick = undoMove;
 $('reviewBox').onchange = e => { reviewOnly = e.target.checked; recompute(); };
 

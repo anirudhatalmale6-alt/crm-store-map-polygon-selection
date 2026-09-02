@@ -35,8 +35,8 @@ The selection engine is identical in both modes; only the tiles change.
 
 ```
 node test-selection.js        # 32 assertions on the selection + clustering engines
-python3 test_ui.py            # 76 assertions driving the real browser + screenshots
-python3 test_gmaps_surface.py # 36 assertions on the GOOGLE surface, with no API key
+python3 test_ui.py            # 80 assertions driving the real browser + screenshots
+python3 test_gmaps_surface.py # 43 assertions on the GOOGLE surface, with no API key
 node server/test_schema.js    # 42 assertions on the table/column config (no database)
 node server/test_geocoder.js  # 26 assertions on the geocoder (stubbed fetch, no cost)
 node server/test_api.js       # 89 assertions: real Express + real MySQL + real HTTP
@@ -44,7 +44,7 @@ node server/test_batch.js     # 53 assertions on the bulk geocoding run (real My
 node server/test_ventas.js    # 60 assertions against YOUR schema and YOUR 2,657 rows
 ```
 
-414 assertions. `test_ventas.js` is the one that matters most, because it is the
+425 assertions. `test_ventas.js` is the one that matters most, because it is the
 only suite whose inputs I did not choose — it runs over your actual data, and every
 correction listed under "Your actual database, measured" below was forced by it.
 
@@ -1003,3 +1003,80 @@ The stub had to be fixed before any of this could be tested: its `getBounds()`
 returned a fixed pair of corners, so it could not express the one thing bounds
 are for — that the view moves — and a viewport bug could not have failed the
 suite. It now tracks `fitBounds()` like the real SDK.
+
+## "Predefine pins according to categories, as we have today"
+
+Your published My Maps uses a different icon per layer — the green cross, the
+wheelchair, the shopping symbol. The map now does the same: tick **Icon pins
+instead of dots** and every store is drawn as a teardrop in its category colour
+with that category's own shape inside it.
+
+| category | colour | shape |
+|---|---|---|
+| Active store | green | shopping bag |
+| Potential | amber | star |
+| Inactive store | grey | cross |
+
+The shape lives in the category definition, next to the colour:
+
+```js
+{ id:'active', label:'Active store', color:'#3ddc97', glyph:GLYPH.bag },
+```
+
+so adding the store types you actually use on My Maps is a row here plus the
+column in the database that says which type a store is. It is not a change to the
+drawing code. **That column does not exist yet** — see below.
+
+Dots stay the default. Icons are new behaviour, and a new default would redraw
+every pin on a map you have already accepted.
+
+Clusters keep the proportional ring rather than taking an icon: a bubble holding
+40 stores of three categories has no single shape that would be honest.
+
+### The one that would have shipped silently
+
+`render()` now skips any marker whose signature has not changed — that is the fix
+for the polygon slowness. A property left out of that signature is therefore a
+control that **appears to do nothing**: you tick the box, the state flips, and
+every marker is judged unchanged and left alone. Three assertions in
+`test_gmaps_surface.py` fail when `pinStyle` is removed from the signature, and
+the first one is the plain statement of it — *switching to icon pins actually
+repaints the markers*.
+
+The other one worth naming: a teardrop anchored at its centre floats half a pin
+north of the store it belongs to. The anchor is the tip, and there is an assertion
+that says so.
+
+## What your My Maps categories are, and where they are not
+
+The icons on your published map separate **store types** — drugstore, orthopaedic
+supplier, supermarket, clinic. `clients` has no column for that. Its `type` is
+`ENUM('store','potential')` and `c_status` is 1/0, which is where the three
+categories on this map come from, and that is all the schema can answer.
+
+So "pins by category, as we have today" needs one of:
+
+- a `c_store_type` column plus a small lookup table, filled in once from your
+  spreadsheet — after which the map follows the CRM forever, or
+- the three categories the data already supports.
+
+Inventing the types from the store names would be the third option and it is the
+wrong one: a rule like "name contains *droguería*" is a guess, and on a map a
+guess looks exactly as authoritative as a fact.
+
+### The region column, measured
+
+Your My Maps layers are regions, so this matters for grouping. Across the 2,423
+pinned rows, `c_dept` holds **69 distinct spellings for 39 actual regions** —
+`ANTIOQUIA` / `Antioquia`; `BOGOTÁ D.C.` / `Bogotá D.C` / `Bogotá D.C.` /
+`Bogota y Cundinamarca`; `Cundiamarca` for Cundinamarca. **2,210 of the 2,423 rows
+are in a group with more than one spelling.**
+
+Eight values are not regions at all: `Clientes Claves` (13), `Internacional` (24),
+`Eje Cafetero` (3), `Resto del Pais` (2), `Calidonia` (1), `Táchira` (11, which is
+Venezuela), `San Andres y Providencia` (1), and 58 rows where it is empty.
+
+Grouped raw that is 69 layers; My Maps allows **10**. That is why the layers on
+your current map are hand-made composites like *Valle del Cauca/Nariño* and
+*Cundinamarca/Meta/Santander/Norte de Santander* — and why they have to be
+re-made by hand every time the list changes.
