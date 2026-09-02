@@ -60,14 +60,37 @@ window.__stub = { markers: [], polylines: [], polygons: [], listeners: {}, curso
     constructor(a) { this.a = (a || []).map(p => new LatLng(p.lat, p.lng)); }
     getArray() { return this.a; }
   }
-  class Map_ {
-    constructor(el, opts) { this.el = el; this.opts = opts || {}; this._h = {}; window.__stub.map = this; }
-    setOptions(o) { Object.assign(this.opts, o); window.__stub.cursor = this.opts.draggableCursor || null; }
-    getCenter() { return new LatLng(40.42, -3.702); }
-    getBounds() {
-      return { getNorthEast: () => new LatLng(40.47, -3.65), getSouthWest: () => new LatLng(40.37, -3.75) };
+  /* Bounds are REAL here, not a fixed pair of corners.
+     They used to be hard-coded to a Madrid rectangle, which quietly made this stub
+     unable to express the one thing bounds are for: that the view moves. Code that
+     asks "is this store on screen?" would have got the same answer at every zoom,
+     so a viewport bug could not fail this suite. */
+  class LatLngBounds {
+    constructor(sw, ne) {
+      const c = p => p && { lat: typeof p.lat === 'function' ? p.lat() : p.lat,
+                            lng: typeof p.lng === 'function' ? p.lng() : p.lng };
+      this.sw = c(sw); this.ne = c(ne);
     }
-    fitBounds() {}
+    extend(p) {
+      const lat = typeof p.lat === 'function' ? p.lat() : p.lat;
+      const lng = typeof p.lng === 'function' ? p.lng() : p.lng;
+      if (!this.sw) { this.sw = { lat, lng }; this.ne = { lat, lng }; return this; }
+      this.sw = { lat: Math.min(this.sw.lat, lat), lng: Math.min(this.sw.lng, lng) };
+      this.ne = { lat: Math.max(this.ne.lat, lat), lng: Math.max(this.ne.lng, lng) };
+      return this;
+    }
+    getSouthWest() { return new LatLng(this.sw.lat, this.sw.lng); }
+    getNorthEast() { return new LatLng(this.ne.lat, this.ne.lng); }
+  }
+  class Map_ {
+    constructor(el, opts) { this.el = el; this.opts = opts || {}; this._b = null; window.__stub.map = this; }
+    setOptions(o) { Object.assign(this.opts, o); window.__stub.cursor = this.opts.draggableCursor || null; }
+    getBounds() { return this._b; }
+    fitBounds(b) { this._b = b; window.__stub.fitted = b; }
+    getCenter() {
+      const b = this._b;
+      return b ? new LatLng((b.sw.lat + b.ne.lat) / 2, (b.sw.lng + b.ne.lng) / 2) : new LatLng(0, 0);
+    }
   }
   class Marker {
     constructor(o) { Object.assign(this, o); rec(window.__stub.markers, this); }
@@ -87,9 +110,10 @@ window.__stub = { markers: [], polylines: [], polygons: [], listeners: {}, curso
     setMap(m) { this.map = m; if (!m) this._gone = true; }
   }
   window.google = { maps: {
-    Map: Map_, Marker, Polyline, Polygon, LatLng, Size: function () {}, Point: function () {},
+    Map: Map_, Marker, Polyline, Polygon, LatLng, LatLngBounds,
+    Size: function (w, h) { this.width = w; this.height = h; },
+    Point: function (x, y) { this.x = x; this.y = y; },
     SymbolPath: { CIRCLE: 0 },
-    LatLngBounds: function () { this.extend = function () {}; },
     event: {
       addListener(obj, ev, fn) { (window.__stub.listeners[ev] = window.__stub.listeners[ev] || []).push({ obj, fn }); },
     },
@@ -180,6 +204,92 @@ with sync_playwright() as p:
     ok("clear resets the selection", page.text_content("#selCount") == "0")
 
     ok("no uncaught javascript errors during the whole run", not errors, errors)
+
+    # ---------- a mixed bubble must not wear another category's colour ----------
+    # The reported bug: with only Active ticked the pins looked right; ticking
+    # Potential turned bubbles the colour of Inactive. Cause: a cluster holding more
+    # than one category was painted #8b97a6, which IS the Inactive colour, byte for
+    # byte. The demo palette has no grey category, so demo data could never show it -
+    # this assertion is written against the palettes themselves for that reason.
+    clash = page.evaluate("""() => {
+      const all = [...REAL_CATEGORIES, ...DEMO_CATEGORIES];
+      return all.filter(c => c.color.toLowerCase() === MIXED_FILL.toLowerCase()).map(c => c.id);
+    }""")
+    ok("the mixed-cluster fill belongs to no category, in either palette", clash == [], clash)
+
+    # And the mix has to survive being drawn, not just be a different flat colour.
+    arcs = page.evaluate("""() => {
+      const mix = clusterMix([{cat:'active'},{cat:'active'},{cat:'potential'}], CATEGORIES);
+      const svg = mixRing(20, 20, 12, mix, 5);
+      return { n: mix.length, counts: mix.map(m => m.count),
+               strokes: (svg.match(/stroke="#[0-9a-f]{6}"/gi) || []).length,
+               colours: mix.map(m => svg.includes('stroke="' + m.color + '"')) };
+    }""")
+    ok("a 2-active + 1-potential cluster reports both categories with their counts",
+       arcs["n"] == 2 and arcs["counts"] == [2, 1], arcs)
+    ok("...and draws one arc per category, each in that category's own colour",
+       arcs["strokes"] == 2 and all(arcs["colours"]), arcs)
+
+    # ---------- only what is on screen becomes a marker ----------
+    # Measured on the client's 2,423 stores at city zoom: 424 markers existed and
+    # every one of them took five setter calls on every redraw - 2,120 SDK mutations
+    # per mouse move while dragging a polygon corner. That is the "very slow to draw
+    # polygons" report. Both halves are fixed here: clip to the viewport, and leave a
+    # marker alone when nothing about it changed.
+    page.evaluate("""() => {
+      stores = stores.concat([{id: 90001, name: 'Far away', cat: 'active',
+                               lat: -33.45, lng: -70.66, src: 'geocoded', prec: 'ROOFTOP',
+                               addr: 'Santiago', locAddr: 'Santiago'}]);
+      recompute();
+    }""")
+    far = page.evaluate("""() => window.__stub.markers.filter(m => !m._gone)
+        .some(m => Math.abs(m.position.lat + 33.45) < 0.01)""")
+    ok("a store on another continent gets no marker while you are looking at Madrid",
+       far is False)
+    ok("...but it is still counted as visible, so nothing has been hidden from you",
+       page.evaluate("visibleStores().some(s => s.id === 90001)") is True)
+
+    # The invariant clipping must not break: what a polygon selects cannot depend on
+    # where the map happens to be pointing, or panning would silently edit the answer.
+    page.click("#drawBtn")
+    for c in corners:
+        page.evaluate(click_map, c)
+    page.click("#drawBtn")
+    sel_before = page.text_content("#selCount")
+    ok("control positive: the polygon selected something to begin with",
+       int(sel_before) > 0, sel_before)
+    page.evaluate("""() => { window.__stub.map.fitBounds(
+        new google.maps.LatLngBounds({lat: -34, lng: -71}, {lat: -33, lng: -70})); recompute(); }""")
+    ok("panning to the other side of the world does not change the selection",
+       page.text_content("#selCount") == sel_before,
+       f"{sel_before} -> {page.text_content('#selCount')}")
+
+    # ---------- an unchanged marker is not touched ----------
+    # Back to Madrid, where the markers are, and let them settle before counting.
+    page.evaluate("""() => { window.__stub.map.fitBounds(
+        new google.maps.LatLngBounds({lat: 40.37, lng: -3.78}, {lat: 40.47, lng: -3.62}));
+        recompute(); }""")
+    page.evaluate("""() => {
+      window.__calls = 0;
+      const M = window.google.maps.Marker;
+      for (const k of ['setIcon','setLabel','setTitle','setPosition','setDraggable']) {
+        const o = M.prototype[k];
+        M.prototype[k] = function (v) { window.__calls++; return o.call(this, v); };
+      }
+    }""")
+    live_now = page.evaluate("window.__stub.markers.filter(m => !m._gone).length")
+    ok("control positive: there are markers on the map to leave alone", live_now > 0, live_now)
+    page.evaluate("recompute()")
+    ok("a redraw that changes nothing pushes nothing into the SDK",
+       page.evaluate("window.__calls") == 0, page.evaluate("window.__calls"))
+    # 0 is also what a render() that never ran looks like, so prove the counter can
+    # move. Clearing the polygon changes how the selected markers are drawn while
+    # leaving their cluster keys - and therefore the marker objects - exactly as they
+    # were, which is precisely the path the diff is allowed to skip and must not.
+    page.evaluate("() => { window.__calls = 0; }")
+    page.click("#clearBtn")
+    ok("control positive: a redraw that DOES change something still repaints",
+       page.evaluate("window.__calls") > 0, page.evaluate("window.__calls"))
 
     # ---------- a half-initialised map must not look like a working one ----------
     # Google builds the basemap first and everything we add to it second, so a throw

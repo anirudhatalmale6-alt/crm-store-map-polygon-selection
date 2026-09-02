@@ -257,8 +257,25 @@ function clusterPoints(points, cellSize) {
   }));
 }
 
+/** What a cluster is made of, ordered by CATEGORIES so the same mix always draws
+ *  the same way. Returns [{id, color, count, frac}].
+ *
+ *  Pure, and shared by both surfaces, because the bug it exists to fix was one of
+ *  colour: a bubble holding more than one category used to be painted a flat grey
+ *  that was EXACTLY the Inactive colour, so ticking Potential turned every
+ *  Active+Potential bubble the colour that means "inactive". Throwing the mix away
+ *  is what made that possible - a bubble that keeps it cannot be mistaken for a
+ *  category it does not contain.
+ */
+function clusterMix(items, categories) {
+  const n = {};
+  for (const i of items) n[i.cat] = (n[i.cat] || 0) + 1;
+  return categories.filter(c => n[c.id]).map(c =>
+    ({ id: c.id, color: c.color, count: n[c.id], frac: n[c.id] / items.length }));
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { pointInPolygon, storesInPolygon, clusterPoints };
+  module.exports = { pointInPolygon, storesInPolygon, clusterPoints, clusterMix };
 }
 
 /* ------------------------------------------------------------------ *
@@ -326,6 +343,36 @@ const mk = (name, cat, lat, lng, src = 'geocoded', prec = 'ROOFTOP') => ({
    category colour, so a dashed amber ring would be indistinguishable from an
    imprecise Potential store at a glance. Solid ring, colour of its own. */
 const STALE_COLOR = '#ff7ad9';
+/* The fill for a bubble holding more than one category. It is deliberately in NO
+   category: the previous value was #8b97a6, which is the Inactive colour to the
+   byte, so a bubble of Active + Potential stores was drawn in the exact colour of
+   the third category. With only Active ticked every bubble was single-category and
+   green, which is why it looked right until you ticked a second box.
+
+   A neutral fill alone would still be a downgrade - it answers "not inactive" and
+   throws away the breakdown you ticked the box to see. So the fill is neutral and
+   the ring carries the mix: one arc per category, sized by how many stores of it
+   are in the bubble. */
+const MIXED_FILL = '#26313c';
+
+/* One SVG ring split into proportional arcs. Same markup on both surfaces: the
+   offline preview drops it straight into its <svg>, Google gets it as a data-URI
+   icon, so the two maps cannot drift apart in how they draw a mixed bubble. */
+function mixRing(cx, cy, r, mix, w) {
+  const C = 2 * Math.PI * r;
+  let off = 0;
+  return mix.map(m => {
+    const len = C * m.frac;
+    const seg = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${m.color}"
+        stroke-width="${w}" stroke-dasharray="${len.toFixed(2)} ${(C - len).toFixed(2)}"
+        stroke-dashoffset="${(-off).toFixed(2)}" transform="rotate(-90 ${cx} ${cy})"/>`;
+    off += len;
+    return seg;
+  }).join('');
+}
+/* "75 stores · 60 Active store, 15 Potential" - the numbers behind the ring, for
+   anyone who wants the exact split rather than the proportions. */
+const mixLabel = mix => mix.map(m => `${m.count} ${catById[m.id].label}`).join(', ');
 /* Red, and used nowhere else: a pin in the wrong country is not a shade of
    "imprecise", it is the one kind of error that is simply wrong. */
 const WRONG_COLOR = '#ff6b6b';
@@ -470,10 +517,19 @@ function recompute() {
     stores: stores.length,
     visible: visibleStores().length,
     selected: selectedIds.size,
+    drawn: window.__drawn || 0,
   };
   const p = $('perf');
+  /* "build", not "draw", and the marker count next to it.
+     This readout said "draw 37 ms" while the map was visibly lagging, because on
+     the Google surface it times how long it takes to hand work TO the SDK - Google
+     paints afterwards, outside the measurement. A number that cannot see the slow
+     part is worse than no number: it says the map is fast while you watch it
+     stutter. The count of markers actually on the map is the figure that moves with
+     what you feel, so it is the one on display. */
   if (p) p.textContent =
-    `${window.__perf.visible} pins · select ${window.__perf.selectMs} ms · draw ${window.__perf.renderMs} ms`;
+    `${window.__perf.visible} pins · ${window.__perf.drawn} on map · ` +
+    `select ${window.__perf.selectMs} ms · build ${window.__perf.renderMs} ms`;
 }
 
 function renderLegend() {
@@ -781,18 +837,22 @@ const OfflineSurface = (() => {
                         font-size="11">${s.name}</text>` : ''}
         </g>`;
       }
-      const cats = new Set(g.items.map(i => i.cat));
-      const fill = cats.size === 1 ? catById[g.items[0].cat].color : '#8b97a6';
+      const mix = clusterMix(g.items, CATEGORIES);
+      const pure = mix.length === 1;
+      const fill = pure ? mix[0].color : MIXED_FILL;
       const selIn = g.items.filter(i => selectedIds.has(i.id)).length;
       // Capped so a bubble never spills outside its own CELL_PX cell and
       // swallows its neighbours.
       const r = Math.min(19, 10 + Math.log2(g.count) * 2.6);
       return `<g>
+        <title>${esc(g.count + ' stores · ' + mixLabel(mix))}</title>
         <circle cx="${g.x}" cy="${g.y}" r="${r + 4}" fill="${fill}" opacity=".22"/>
         <circle cx="${g.x}" cy="${g.y}" r="${r}" fill="${fill}"
                 stroke="${selIn ? '#fff' : '#0f1216'}" stroke-width="${selIn ? 2.5 : 1.5}"
                 opacity="${selIn ? 1 : .85}"/>
-        <text x="${g.x}" y="${g.y + 4}" text-anchor="middle" fill="#0f1216"
+        ${pure ? '' : mixRing(g.x, g.y, r - 2.6, mix, 5.2)}
+        <text x="${g.x}" y="${g.y + 4}" text-anchor="middle"
+              fill="${pure ? '#0f1216' : '#e6ebf1'}"
               font-size="${r > 16 ? 12 : 10}" font-weight="700">${g.count}</text>
         ${selIn && selIn < g.count
           ? `<text x="${g.x}" y="${g.y + r + 12}" text-anchor="middle" fill="#e6ebf1"
@@ -806,6 +866,7 @@ const OfflineSurface = (() => {
       ${poly}${marks}
     </svg>`;
 
+    window.__drawn = groups.length;
     const svg = host.querySelector('svg');
 
     svg.onclick = e => {
@@ -969,10 +1030,32 @@ const GoogleSurface = (() => {
     return { lng: spanLng / el.clientWidth, lat: (ne.lat() - sw.lat()) / el.clientHeight };
   }
 
+  /* Build markers for what is on screen (plus a viewport of margin), not for the
+     whole country.
+     Measured on the client's own 2,423 stores, zoomed into one city: the old code
+     built 994 markers and then called setPosition/setIcon/setLabel/setTitle/
+     setDraggable on EVERY one of them on EVERY recompute - 4,970 SDK mutations per
+     redraw, for markers mostly hundreds of kilometres off screen. Dragging a polygon
+     corner fires a recompute per mouse move, which is where "very slow to draw
+     polygons" came from.
+     The margin is a full viewport on each side, so panning finds pins already there
+     and a cluster straddling the edge is not sliced in half.
+     Selection is deliberately NOT clipped: it runs over visibleStores(), so what a
+     polygon has selected does not change when you pan or zoom away from it. */
+  function clipToView(list) {
+    const b = map.getBounds();
+    if (!b) return list;
+    const ne = b.getNorthEast(), sw = b.getSouthWest();
+    const dLat = ne.lat() - sw.lat(), dLng = ne.lng() - sw.lng();
+    if (!(dLat > 0) || !(dLng > 0)) return list;   // no bounds yet, or across the date line
+    return list.filter(s => s.lat >= sw.lat() - dLat && s.lat <= ne.lat() + dLat
+                         && s.lng >= sw.lng() - dLng && s.lng <= ne.lng() + dLng);
+  }
+
   function render() {
     if (!map) return;
     drawPolygon();
-    const vis = visibleStores();
+    const vis = clipToView(visibleStores());
     const d = degPerPx();
     let groups;
     if (clustering && d) {
@@ -997,8 +1080,9 @@ const GoogleSurface = (() => {
       const single = g.count === 1;
       const s = g.items[0];
       const selIn = g.items.filter(i => selectedIds.has(i.id)).length;
-      const cats = new Set(g.items.map(i => i.cat));
-      const colour = cats.size === 1 ? catById[s.cat].color : '#8b97a6';
+      const mix = clusterMix(g.items, CATEGORIES);
+      const pure = mix.length === 1;
+      const colour = pure ? mix[0].color : MIXED_FILL;
       const pos = single
         ? { lat: s.lat, lng: s.lng }
         : { lat: g.items.reduce((a, i) => a + i.lat, 0) / g.count,
@@ -1006,7 +1090,22 @@ const GoogleSurface = (() => {
 
       const vague = single && isVague(s);
       const stale = single && isStale(s);
-      const icon = {
+      const scale = single ? (selIn ? 9 : 6) : Math.min(22, 10 + Math.log2(g.count) * 3);
+
+      /* A mixed bubble is drawn as a data-URI SVG rather than a SymbolPath circle,
+         because a symbol takes ONE fill and the whole point here is that it holds
+         more than one category. Same mixRing() as the offline preview. */
+      const icon = !pure ? (() => {
+        const D = Math.ceil((scale + 3) * 2);
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${D}" height="${D}">` +
+          `<circle cx="${D / 2}" cy="${D / 2}" r="${scale}" fill="${MIXED_FILL}" ` +
+          `stroke="${selIn ? '#ffffff' : '#0f1216'}" stroke-width="${selIn ? 3 : 1.5}"/>` +
+          mixRing(D / 2, D / 2, scale - 2.6, mix, 5.2) + `</svg>`;
+        return { url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg),
+                 scaledSize: new google.maps.Size(D, D),
+                 anchor: new google.maps.Point(D / 2, D / 2),
+                 labelOrigin: new google.maps.Point(D / 2, D / 2) };
+      })() : {
         path: google.maps.SymbolPath.CIRCLE,
         // Hollow = Google was not confident where this one is. Same colour, so the
         // category is still readable.
@@ -1017,21 +1116,36 @@ const GoogleSurface = (() => {
            on the wrong street is not. */
         strokeColor: stale ? STALE_COLOR : (vague ? colour : (selIn ? '#ffffff' : '#0f1216')),
         strokeWeight: stale ? 4 : (vague ? 2.5 : (selIn ? 3 : 1.5)),
-        scale: single ? (selIn ? 9 : 6) : Math.min(22, 10 + Math.log2(g.count) * 3),
+        scale,
       };
+      // Dark digits read on a bright single-category bubble; a mixed bubble has a
+      // dark fill, so they have to flip or the count disappears into it.
       const label = single ? null
-        : { text: String(g.count), color: '#0f1216', fontSize: '11px', fontWeight: '700' };
+        : { text: String(g.count), color: pure ? '#0f1216' : '#e6ebf1',
+            fontSize: '11px', fontWeight: '700' };
       const title = single
         ? s.name +
           (stale ? ` · address changed to "${s.addr}" — this pin is still at "${s.locAddr}"` : '') +
           (s.src === 'manual' ? ' · position adjusted by hand' : ' · drag to adjust')
-        : `${g.count} stores${selIn ? ` · ${selIn} selected` : ''}`;
+        : `${g.count} stores · ${mixLabel(mix)}${selIn ? ` · ${selIn} selected` : ''}`;
 
       // Single pins can be dragged to correct their position; cluster bubbles
       // cannot, because "move these 40 stores" is not a thing anyone means.
       // Dragging is also off while the polygon tool is armed, so a pin cannot be
       // yanked across the map when the user meant to draw a corner.
       const canDrag = single && !drawing;
+
+      /* Everything that decides how this marker looks, as a comparable string.
+         Built from primitives on purpose rather than JSON.stringify(icon): the icon
+         holds google.maps.Size and Point objects, which stringify to {} and would
+         make two different sizes compare equal.
+         Without this, a redraw pushed five setters into the SDK for every marker
+         whether or not anything about it had changed. During a vertex drag only a
+         handful of bubbles actually flip selection state; the rest are now left
+         alone, which is the difference between the SDK repainting the map and the
+         SDK repainting one bubble. */
+      const sig = [pos.lat, pos.lng, colour, scale, selIn, g.count, canDrag,
+                   vague, stale, mix.map(x => x.id + ':' + x.count).join(','), title].join('|');
 
       let m = markers.get(key);
       if (!m) {
@@ -1050,14 +1164,16 @@ const GoogleSurface = (() => {
           });
         }
         markers.set(key, m);
-      } else {
+      } else if (m.__sig !== sig) {
         m.setPosition(pos);        // handles the lat/long-updated case
         m.setIcon(icon);
         m.setLabel(label);
         m.setTitle(title);
         m.setDraggable(canDrag);
       }
+      m.__sig = sig;
     });
+    window.__drawn = markers.size;
   }
 
   return {

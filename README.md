@@ -34,9 +34,9 @@ The selection engine is identical in both modes; only the tiles change.
 ## Tests
 
 ```
-node test-selection.js        # 23 assertions on the selection + clustering engines
+node test-selection.js        # 32 assertions on the selection + clustering engines
 python3 test_ui.py            # 76 assertions driving the real browser + screenshots
-python3 test_gmaps_surface.py # 26 assertions on the GOOGLE surface, with no API key
+python3 test_gmaps_surface.py # 36 assertions on the GOOGLE surface, with no API key
 node server/test_schema.js    # 42 assertions on the table/column config (no database)
 node server/test_geocoder.js  # 26 assertions on the geocoder (stubbed fetch, no cost)
 node server/test_api.js       # 89 assertions: real Express + real MySQL + real HTTP
@@ -44,7 +44,7 @@ node server/test_batch.js     # 53 assertions on the bulk geocoding run (real My
 node server/test_ventas.js    # 60 assertions against YOUR schema and YOUR 2,657 rows
 ```
 
-395 assertions. `test_ventas.js` is the one that matters most, because it is the
+414 assertions. `test_ventas.js` is the one that matters most, because it is the
 only suite whose inputs I did not choose — it runs over your actual data, and every
 correction listed under "Your actual database, measured" below was forced by it.
 
@@ -932,3 +932,74 @@ would pass on a page that loaded perfectly.
 To find out which call it was on your machine: open the page, press F12, click
 Load Google Maps, and read the red line in the Console tab. With this build the
 banner will simply tell you.
+
+## "Ticking Potential changes the colour of my Active stores"
+
+Reported after loading the Colombian pins, and correct. With only Active ticked
+every bubble held one category and was drawn green. Ticking a second category
+made bubbles that held two — and a bubble holding more than one category was
+painted `#8b97a6`, which is the **Inactive** colour, byte for byte.
+
+So the map was not merely confusing. There are 38 inactive stores in your
+database. The old map drew roughly 2,300 stores in the colour that means
+inactive — a grey map of a database that is 47% active. The before/after pair of
+that view went to you in chat rather than into this repo, because renders of your
+real data show your customers by name.
+
+`shots/5-2000-stores-clustered.png` shows the new bubbles on demo data.
+
+The demo data could never have shown this. Its three categories are
+active/potential/chain and none of them is grey, so the collision only exists
+against your palette — which is why the test for it is written against the
+palettes themselves rather than against a rendered map:
+
+    the mixed-cluster fill belongs to no category, in either palette
+
+A neutral fill on its own would still have been a downgrade: it answers "not
+inactive" and throws away the breakdown you ticked the second box to see. So the
+fill is neutral and the **ring carries the mix** — one arc per category, sized by
+how many stores of it are in the bubble, same `mixRing()` on both surfaces so the
+two maps cannot drift apart. Hovering gives you the numbers: `75 stores · 60
+Active store, 15 Potential`.
+
+## "Very very slow to draw polygons"
+
+Also correct, and the readout in the corner was part of the problem: it said
+`draw 37.3 ms` while the map visibly stuttered. On the Google surface that number
+times how long it takes to hand work **to** the SDK. Google paints afterwards,
+outside the measurement — so the instrument could not see the slow part and
+reported the map as fast while you watched it lag.
+
+Measured properly, on your 2,423 stores at the zoom in your screenshot:
+
+| | before | after |
+|---|---|---|
+| markers on the map | 424 | 43 |
+| SDK calls per mouse-move while dragging a corner | 2,120 | 0 |
+
+Two causes, both fixed:
+
+1. **Markers were built for the whole country.** Zoomed into Medellín, every
+   store in Bogotá, Cali and the coast still got its own marker off screen.
+   `clipToView()` now builds markers for the viewport plus a viewport of margin
+   on each side, so panning finds pins already there and a cluster straddling the
+   edge is not sliced in half.
+2. **Every marker was rewritten on every redraw.** `setPosition`, `setIcon`,
+   `setLabel`, `setTitle` and `setDraggable` fired on all 424 whether or not
+   anything about them had changed — and dragging a polygon corner fires a redraw
+   per mouse move. Each marker now carries a signature of everything that decides
+   how it looks; if it has not changed, it is not touched.
+
+The invariant that clipping must not break, and which is asserted: **selection is
+not clipped**. It runs over every visible store, so what a polygon has selected
+does not change when you pan or zoom away from it. Panning to Chile and back
+leaves the count identical.
+
+`0` SDK calls is also what "render never ran" looks like, so that assertion is
+paired with a control positive that a redraw which *does* change something still
+repaints.
+
+The stub had to be fixed before any of this could be tested: its `getBounds()`
+returned a fixed pair of corners, so it could not express the one thing bounds
+are for — that the view moves — and a viewport bug could not have failed the
+suite. It now tracks `fitBounds()` like the real SDK.

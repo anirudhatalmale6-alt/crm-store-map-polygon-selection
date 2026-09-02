@@ -8,8 +8,8 @@ const start = html.indexOf('function pointInPolygon');
 const end = html.indexOf('if (typeof module');
 if (start < 0 || end < 0) throw new Error('could not extract engine from html');
 const src = html.slice(start, end);
-const { pointInPolygon, storesInPolygon, clusterPoints } =
-  new Function(src + '\nreturn { pointInPolygon, storesInPolygon, clusterPoints };')();
+const { pointInPolygon, storesInPolygon, clusterPoints, clusterMix } =
+  new Function(src + '\nreturn { pointInPolygon, storesInPolygon, clusterPoints, clusterMix };')();
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => {
@@ -89,6 +89,43 @@ ok('a merged cluster sits between its members',
 ok('cellSize 0 disables clustering rather than dividing by zero',
    clusterPoints(grid, 0).length === 500);
 ok('empty input gives no clusters', clusterPoints([], 40).length === 0);
+
+// ---------------------------------------------------------------------------
+// What a cluster is MADE of. This exists because a bubble holding two categories
+// used to be painted one flat grey - the same grey as the Inactive category - so
+// ticking a second category made active stores look inactive. Keeping the
+// breakdown is what makes that impossible, so the breakdown gets tested.
+console.log('\nclusterMix');
+const CATS = [
+  { id: 'active',    label: 'Active store',   color: '#3ddc97' },
+  { id: 'potential', label: 'Potential',      color: '#ffb454' },
+  { id: 'inactive',  label: 'Inactive store', color: '#8b97a6' },
+];
+const mixOf = cats => clusterMix(cats.map(c => ({ cat: c })), CATS);
+
+const m1 = mixOf(['active', 'active', 'active']);
+ok('a single-category cluster reports one category', m1.length === 1 && m1[0].count === 3);
+ok('...whose share is the whole bubble', m1[0].frac === 1);
+
+const m2 = mixOf(['active', 'active', 'active', 'potential']);
+ok('a mixed cluster reports every category in it', m2.length === 2);
+ok('...with the right counts', m2.map(m => m.id + ':' + m.count).join(',') === 'active:3,potential:1');
+ok('...and shares that add up to exactly 1',
+   Math.abs(m2.reduce((a, m) => a + m.frac, 0) - 1) < 1e-12);
+// Conservation, same property the clustering tests pin: no store falls out of the
+// breakdown, because a bubble that under-reports is a bubble drawn wrong.
+ok('every store in the cluster is accounted for',
+   m2.reduce((a, m) => a + m.count, 0) === 4);
+
+// Order comes from CATEGORIES, not from the order stores happen to arrive in.
+// Two bubbles with the same mix have to look the same, or the ring stops being
+// something you can read across the map.
+ok('the order is the category order, not the arrival order',
+   mixOf(['potential', 'active']).map(m => m.id).join(',') === 'active,potential');
+ok('a category with nobody in it is left out entirely',
+   mixOf(['active']).some(m => m.id === 'inactive') === false);
+ok('control positive: it does report inactive when there IS one',
+   mixOf(['active', 'inactive']).some(m => m.id === 'inactive') === true);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
