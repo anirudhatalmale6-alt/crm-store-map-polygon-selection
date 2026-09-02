@@ -455,6 +455,75 @@ with sync_playwright() as p:
     ok("turning it off puts the dots back",
        page.evaluate("document.querySelectorAll('#offline svg g.pin').length") == 0)
 
+    # ---------- colouring by a dedicated store-type column ----------
+    # "If we have a dedicated column, can we have automatic differentiated pins?"
+    # The failure worth guarding is not the happy path. It is the store whose column
+    # is EMPTY: a lookup that returns undefined for it drops the pin off the map with
+    # no error anywhere, while the total at the top still looks plausible. So the
+    # empty case is asserted first and by name.
+    status_ids = page.evaluate("CATEGORIES.map(c => c.id)")
+    before = page.evaluate("stores.length")
+    page.select_option("#catMode", "stype")
+    tally = page.evaluate("""() => {
+      const c = {};
+      stores.forEach(s => c[s.cat] = (c[s.cat] || 0) + 1);
+      return { counts: c, cats: CATEGORIES.map(x => x.id),
+               unknown: typeOf('veterinaria').id, empty: typeOf(null).id,
+               legend: [...document.querySelectorAll('#legend .count')].map(e => +e.textContent) };
+    }""")
+    ok("colouring by store type keeps every store on the map",
+       page.evaluate("stores.length") == before, f'{before} -> {page.evaluate("stores.length")}')
+    ok("...each in exactly one bucket, none counted twice",
+       sum(tally["counts"].values()) == before, tally["counts"])
+    ok("...and none in a bucket the palette does not contain",
+       set(tally["counts"]) <= set(tally["cats"]),
+       set(tally["counts"]) - set(tally["cats"]))
+    ok("a store whose type column is empty is drawn Unclassified, not dropped",
+       tally["counts"].get("unclassified", 0) > 0, tally["counts"])
+    ok("...and a value nobody has added to the table yet does the same",
+       tally["unknown"] == "unclassified" and tally["empty"] == "unclassified", tally)
+    ok("the legend adds up to the whole database, so nothing hides between buckets",
+       sum(tally["legend"]) == before, f'legend={sum(tally["legend"])} stores={before}')
+    # Control positive on the FIXTURE, not the code. The first version of the demo
+    # assignment used a stride that shares a factor with the number of types, so it
+    # only ever reached two of the six - every assertion above still passed while the
+    # map showed a feature that looked half-built.
+    missing = page.evaluate("""(c) => STORE_TYPES.map(t => t.id).filter(id => !c[id])""",
+                            tally["counts"])
+    ok("...and every store type in the table actually has stores to draw",
+       missing == [], missing)
+    opts = page.eval_on_selector_all("#nCat option", "e => e.map(x => x.value)")
+    ok("the add-store dropdown follows the mode instead of offering statuses",
+       "drugstore" in opts and "active" not in opts, opts)
+    ok("...and does not offer Unclassified, which is a fallback and not a choice",
+       "unclassified" not in opts, opts)
+    page.check("#iconBox")
+    # A pin Google was unsure about is drawn hollow - the colour comes out of the fill.
+    # It then has to go somewhere, and the only place left is the outline. It did not:
+    # a dark body with a dark outline, on a dark map, and Unclassified has no glyph to
+    # give it away either, so those pins were invisible while the readout said all
+    # 2,423 were on the map. Counting them would never have found it; the screenshot did.
+    ink = page.evaluate("""() => {
+      const DARK = new Set(['#141a21', '#0f1216']);
+      const b = [...document.querySelectorAll('#offline svg g.pin')]
+        .map(g => g.querySelector('path')).filter(Boolean)
+        .map(p => ({ f: p.getAttribute('fill'), s: p.getAttribute('stroke') }));
+      return { n: b.length, hollow: b.filter(x => x.f === '#141a21').length,
+               invisible: b.filter(x => DARK.has(x.f) && DARK.has(x.s)).length };
+    }""")
+    ok("control positive: some pins are drawn hollow, so the case is on screen",
+       ink["hollow"] > 0, ink)
+    ok("...and not one of them is dark on a dark map with nothing to see it by",
+       ink["invisible"] == 0, ink)
+    shot("7-store-types.png")
+    page.uncheck("#iconBox")
+    page.select_option("#catMode", "status")
+    ok("switching back gives you the status categories exactly as before",
+       page.evaluate("CATEGORIES.map(c => c.id)") == status_ids,
+       page.evaluate("CATEGORIES.map(c => c.id)"))
+    ok("...with every store back on its own status, not stuck on its type",
+       page.evaluate("stores.every(s => s.cat === s.statusCat)"))
+
     ok("no uncaught javascript errors on the page", not errors, errors)
     browser.close()
 

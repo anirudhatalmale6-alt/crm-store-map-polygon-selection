@@ -98,6 +98,10 @@
   <aside class="left">
     <div class="section">
       <h2>Store categories</h2>
+      <div class="field"><span>Colour pins by</span><select id="catMode">
+        <option value="status">Status &mdash; the columns you have today</option>
+        <option value="stype">Store type &mdash; needs a new column</option>
+      </select></div>
       <div class="legend" id="legend"></div>
       <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;margin-top:10px">
         <input type="checkbox" id="iconBox"> Icon pins instead of dots
@@ -105,6 +109,7 @@
       <p class="hint">Each category carries its own pin shape, the way the layers on your
          My Maps do. Clusters keep the ring, because a bubble of 40 stores has no single
          icon to show.</p>
+      <p class="hint" id="catModeNote"></p>
     </div>
 
     <div class="section">
@@ -321,6 +326,14 @@ const GLYPH = {
   star:  { d:'M12 7.1l1.53 3.1 3.42.5-2.475 2.41.585 3.41L12 14.91l-3.06 1.61.585-3.41L7.05 10.7l3.42-.5L12 7.1z', filled:true },
   cross: { d:'M9.3 8.3l5.4 5.4 M14.7 8.3l-5.4 5.4' },
   chain: { d:'M10.6 13.4l2.8-2.8 M9.9 11.3l-1 1a2.1 2.1 0 0 0 3 3l1-1 M14.1 12.7l1-1a2.1 2.1 0 0 0-3-3l-1 1' },
+  /* Store-type glyphs. Kept simple on purpose: at 30px on a phone a shape has about
+     six strokes before it turns into a smudge, which is also why there are seven
+     types below and not twenty. */
+  plus:  { d:'M12 6.6v7.8 M8.1 10.5h7.8' },
+  crutch:{ d:'M9.4 7.2h5.2 M12 7.2v6.6 M12 13.8l-1.9 3 M12 13.8l1.9 3' },
+  cart:  { d:'M7.2 8.1h1.7l1.5 5.6h5.2l1.2-4H9.4 M11 16.2a.75.75 0 1 1-.01 0 M15.4 16.2a.75.75 0 1 1-.01 0' },
+  truck: { d:'M6.6 8.4h6.6v6.1H6.6z M13.2 10.6h2.6l1.6 2v1.9h-4.2 M9.3 16a1.1 1.1 0 1 1-.01 0 M15.4 16a1.1 1.1 0 1 1-.01 0' },
+  bldg:  { d:'M8.2 16.4V7.9h7.6v8.5 M10.3 10.3h1.2 M13.4 10.3h1.2 M10.3 13h1.2 M13.4 13h1.2' },
 };
 const REAL_CATEGORIES = [
   { id:'active',    label:'Active store',   color:'#3ddc97', glyph:GLYPH.bag },
@@ -332,8 +345,40 @@ const DEMO_CATEGORIES = [
   { id:'potential', label:'Potential', color:'#ffb454', glyph:GLYPH.star },
   { id:'chain',     label:'Chain',     color:'#4f9dff', glyph:GLYPH.chain },
 ];
-const CATEGORIES = REAL ? REAL_CATEGORIES : DEMO_CATEGORIES;
-const catById = Object.fromEntries(CATEGORIES.map(c => [c.id, c]));
+
+/* ---- What a dedicated store-type column buys you -------------------------------
+   The pins on your My Maps encode a store TYPE - drugstore, orthopaedic, supermarket.
+   `clients` has no column for that today, so this table is the thing that would live
+   in the database beside it: one row per type, carrying its colour and its shape.
+
+   It is a TABLE and not a switch in the drawing code for one reason: adding
+   "Veterinary" next year is then an INSERT that whoever maintains the CRM can do,
+   with no deploy and nobody touching this file. */
+const STORE_TYPES = [
+  { id:'drugstore',   label:'Drugstore',    color:'#4f9dff', glyph:GLYPH.plus },
+  { id:'orthopaedic', label:'Orthopaedic',  color:'#a78bfa', glyph:GLYPH.crutch },
+  { id:'supermarket', label:'Supermarket',  color:'#ffb454', glyph:GLYPH.cart },
+  { id:'distributor', label:'Distributor',  color:'#3ddc97', glyph:GLYPH.truck },
+  { id:'clinic',      label:'Clinic / IPS', color:'#22d3ee', glyph:GLYPH.bldg },
+  { id:'other',       label:'Other',        color:'#f472b6', glyph:GLYPH.star },
+];
+/* Every lookup goes through `typeOf`, and it never returns undefined. A store whose
+   column is empty, or holds a value nobody has added to the table yet, still gets a
+   pin: grey, counted in the legend, selectable by a polygon. That matters more than
+   it sounds. The alternative - a lookup that returns nothing and a marker that is
+   quietly skipped - is how a shop disappears off a map for a year with no error
+   anywhere, and the total at the top still looks plausible. */
+const UNCLASSIFIED = { id:'unclassified', label:'Unclassified', color:'#8b97a6', glyph:null };
+const typeById = Object.fromEntries(STORE_TYPES.map(t => [t.id, t]));
+const typeOf = v => typeById[v] || UNCLASSIFIED;
+const TYPE_CATEGORIES = STORE_TYPES.concat([UNCLASSIFIED]);
+
+const STATUS_CATEGORIES = REAL ? REAL_CATEGORIES : DEMO_CATEGORIES;
+/* Reassigned by setCatMode(). Everything downstream reads a store's `cat` and looks
+   it up here, so switching what the colours MEAN is a change in two bindings rather
+   than in fifteen call sites. */
+let CATEGORIES = STATUS_CATEGORIES;
+let catById = Object.fromEntries(CATEGORIES.map(c => [c.id, c]));
 
 let nextId = 1;
 /* `src` mirrors the location_source column: null = never positioned,
@@ -347,8 +392,12 @@ let nextId = 1;
    address this pin was actually placed for. They are two different things the
    moment somebody edits an address, and the gap between them is the only way to
    know that a pin is sitting on a street the store has moved away from. */
-const mk = (name, cat, lat, lng, src = 'geocoded', prec = 'ROOFTOP') => ({
-  id: nextId++, name, cat, lat, lng, src, prec,
+/* `statusCat` is the store's status category, kept even while the map is coloured by
+   store type, and `stype` is the store-type column. `cat` is whichever of the two the
+   map is showing right now - derived, never the source of truth, so switching the
+   colouring back and forth cannot lose either one. */
+const mk = (name, cat, lat, lng, src = 'geocoded', prec = 'ROOFTOP', stype = null) => ({
+  id: nextId++, name, cat, statusCat: cat, stype, lat, lng, src, prec,
   addr: name + ', Madrid',
   // A store that has never been positioned has no address on record. "No record"
   // must not mean "changed", or every store would look stale the day this ships.
@@ -402,8 +451,15 @@ function pinSvg(cat, o = {}) {
   const body = o.hollow ? '#141a21' : cat.color;
   const ink = o.hollow ? cat.color : '#0f1216';
   const g = cat.glyph;
-  return `<path d="${PIN_PATH}" fill="${body}" stroke="${o.stroke || '#0f1216'}"
-            stroke-width="${o.weight == null ? 1.4 : o.weight}"/>` +
+  /* A hollow pin takes the colour out of the FILL, so it has to go on the OUTLINE or
+     the pin is dark on a dark map. That was not theoretical: with the store-type
+     column empty, every real store is Unclassified, Unclassified has no glyph by
+     design, and an imprecise one came out as a dark shape on a dark background with a
+     dark outline - invisible, while the counter cheerfully said 2,423 on map. */
+  const edge = o.stroke || (o.hollow ? cat.color : '#0f1216');
+  const w = o.weight == null ? (o.hollow ? 2 : 1.4) : o.weight;
+  return `<path d="${PIN_PATH}" fill="${body}" stroke="${edge}"
+            stroke-width="${w}"/>` +
     (g ? `<path d="${g.d}" fill="${g.filled ? ink : 'none'}"
             stroke="${g.filled ? 'none' : ink}" stroke-width="1.9"
             stroke-linecap="round" stroke-linejoin="round"/>` : '');
@@ -490,13 +546,18 @@ function makeBulkStores(n) {
     // geographically (chains downtown, prospects on the edges). Round-robin would
     // make every cluster mixed, and every bubble on the map the same grey.
     const sector = Math.floor(a / ((Math.PI * 2) / 3));
-    const cat = CATEGORIES[(sector + DISTRICTS.indexOf(d)) % CATEGORIES.length].id;
+    // STATUS_CATEGORIES, not CATEGORIES: this is the store's status, and loading the
+    // stress set while the map is coloured by store type must not write a type id
+    // into the status field.
+    const cat = STATUS_CATEGORIES[(sector + DISTRICTS.indexOf(d)) % STATUS_CATEGORIES.length].id;
     // About 8% come back imprecise, which is a realistic tail for a real address
     // list. Deterministic, so the review count is the same on every run.
     const h = hash01(i + 0.53);
     const prec = h < 0.045 ? 'APPROXIMATE' : h < 0.08 ? 'GEOMETRIC_CENTER' : 'ROOFTOP';
     out.push(mk(`Store ${i + 1}`, cat,
-                d.lat + rad * Math.sin(a), d.lng + rad * Math.cos(a), 'geocoded', prec));
+                d.lat + rad * Math.sin(a), d.lng + rad * Math.cos(a), 'geocoded', prec,
+                // Same rule as the named set: roughly one in seven has no type yet.
+                (i % 7 === 3) ? null : STORE_TYPES[Math.floor(hash01(i + 0.19) * STORE_TYPES.length)].id));
   }
   return out;
 }
@@ -506,7 +567,13 @@ function makeBulkStores(n) {
    that lies in a way nobody would notice from the totals. */
 if (REAL) {
   stores = REAL.stores.map(s => ({
-    id: s.id, name: s.name, cat: s.cat, lat: s.lat, lng: s.lng,
+    id: s.id, name: s.name, cat: s.cat, statusCat: s.cat,
+    /* Your export carries no store type, because `clients` has no column for one.
+       So every real store resolves to Unclassified until that column exists and is
+       filled - which is the honest picture, and is also the fallback above doing its
+       job on 2,423 rows rather than on a fixture I built to make it pass. */
+    stype: s.stype || null,
+    lat: s.lat, lng: s.lng,
     src: s.src || 'geocoded', prec: s.prec,
     addr: s.addr,
     // The pin WAS placed for this address, so it starts in agreement with itself.
@@ -516,6 +583,19 @@ if (REAL) {
   }));
   // Adding a store must not reuse a cl_id that already exists in your CRM.
   nextId = stores.reduce((m, s) => Math.max(m, s.id), 0) + 1;
+} else {
+  /* Demo only. The invented Madrid set gets invented store types so the "colour by
+     store type" mode has something to show. One in seven is deliberately left empty:
+     a column added today is empty tomorrow, and the map has to be honest about that
+     instead of looking finished. Never done to the real data - a guessed type reads
+     as a fact on a map. */
+  stores.forEach((s, i) => {
+    /* The stride has to be coprime with the number of types or it never visits them
+       all: (i * 3) % 6 only ever lands on two of the six, and the demo map came out
+       showing Orthopaedic and Clinic and nothing else - a feature that looked broken
+       because of the fixture, not the code. */
+    s.stype = (i % 7 === 3) ? null : STORE_TYPES[(i * 5 + 2) % STORE_TYPES.length].id;
+  });
 }
 
 let polygon = [];      // [{lat,lng}]
@@ -527,6 +607,9 @@ let reviewOnly = false;  // show only the pins Google was unsure about
    behaviour, so it has to be asked for. A new default that redraws every pin would be
    a change nobody requested. */
 let pinStyle = 'dot';    // 'dot' | 'icon'
+/* What the colours and shapes MEAN. 'status' is what this map shipped with and stays
+   the default; 'stype' is what a dedicated store-type column would give you. */
+let catMode = 'status';  // 'status' | 'stype'
 let clustering = true;  // merge nearby pins into a numbered bubble
 const CELL_PX = 48;     // cluster grid size in screen pixels
 
@@ -534,6 +617,29 @@ const CELL_PX = 48;     // cluster grid size in screen pixels
  * 3. Shared state -> UI
  * ------------------------------------------------------------------ */
 const $ = id => document.getElementById(id);
+
+/* Switch what the map is colouring BY. Three things have to move together or the
+   page contradicts itself: the palette, every store's derived `cat`, and the tick
+   boxes - a category hidden in one mode has no meaning in the other, so the filter
+   is reset rather than carried across under a name that no longer exists. */
+function setCatMode(mode) {
+  catMode = mode === 'stype' ? 'stype' : 'status';
+  CATEGORIES = catMode === 'stype' ? TYPE_CATEGORIES : STATUS_CATEGORIES;
+  catById = Object.fromEntries(CATEGORIES.map(c => [c.id, c]));
+  stores.forEach(s => { s.cat = catMode === 'stype' ? typeOf(s.stype).id : s.statusCat; });
+  hidden = new Set();
+  fillCatSelect();
+}
+
+/* The "add a store" dropdown offers whatever the map is currently coloured by. Left
+   unrefreshed it would keep offering Active/Potential while the map draws store
+   types, and every store added would land as Unclassified for no visible reason. */
+function fillCatSelect() {
+  const sel = $('nCat');
+  if (sel) sel.innerHTML = CATEGORIES
+    .filter(c => c.id !== UNCLASSIFIED.id)
+    .map(c => `<option value="${c.id}">${c.label}</option>`).join('');
+}
 
 function visibleStores() {
   return stores.filter(s => !hidden.has(s.cat) && (!reviewOnly || needsReview(s)));
@@ -661,6 +767,9 @@ function log(msg) {
 
 /* ---- CRM operations: these are the three sync cases in the scope ---- */
 function addStore(s) {
+  // `cat` is derived from whichever field the map is colouring by, so a store added
+  // while the map shows store types is drawn as its type and not as its status.
+  s.cat = catMode === 'stype' ? typeOf(s.stype).id : s.statusCat;
   stores.push(s);
   log(`+ added "${s.name}" (${s.lat.toFixed(4)}, ${s.lng.toFixed(4)})`);
   recompute();
@@ -874,8 +983,11 @@ const OfflineSurface = (() => {
             <g class="pin" data-sid="${s.id}"
                transform="translate(${g.x - 12 * k} ${g.y - 23 * k}) scale(${k})"
                opacity="${on ? 1 : .92}">
-              ${pinSvg(cat, { hollow: vague, stroke: on ? '#fff' : '#0f1216',
-                              weight: on ? 2.2 : 1.4 })}
+              ${pinSvg(cat, { hollow: vague,
+                              // undefined, not '#0f1216': it lets pinSvg put the
+                              // category colour on the outline of a hollow pin.
+                              stroke: on ? '#fff' : undefined,
+                              weight: on ? 2.2 : (vague ? 2 : 1.4) })}
             </g>
             ${s.src === 'manual'
               ? `<circle class="pin" data-sid="${s.id}" cx="${g.x}" cy="${g.y}" r="2"
@@ -1172,8 +1284,8 @@ const GoogleSurface = (() => {
         const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${D}" height="${D}" ` +
           `viewBox="0 0 24 24">` +
           pinSvg(catById[s.cat], { hollow: vague,
-                                   stroke: stale ? STALE_COLOR : (selIn ? '#ffffff' : '#0f1216'),
-                                   weight: stale ? 2.6 : (selIn ? 2 : 1.2) }) + `</svg>`;
+                                   stroke: stale ? STALE_COLOR : (selIn ? '#ffffff' : undefined),
+                                   weight: stale ? 2.6 : (selIn ? 2 : (vague ? 2 : 1.2)) }) + `</svg>`;
         return { url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg),
                  scaledSize: new google.maps.Size(D, D),
                  anchor: new google.maps.Point(D / 2, 23 * k),
@@ -1232,7 +1344,16 @@ const GoogleSurface = (() => {
       /* pinStyle belongs in here for the same reason everything else does: the diff
          below skips any marker whose signature is unchanged, so a property left out
          of it is a control that appears to do nothing. */
-      const sig = [pinStyle, pos.lat, pos.lng, colour, scale, selIn, g.count, canDrag,
+      /* catMode is in here as a second lock, not the only one. Categories in the two
+         palettes share colours to the byte - Active and Distributor are both #3ddc97 -
+         so for those stores switching what the map MEANS changes nothing but the
+         shape, and a signature made of colour alone would skip them. What actually
+         catches that today is the category id inside `mix` below; I checked, by taking
+         each of the two out separately (still green, because either one is enough) and
+         then both together, which fails. Keeping both is a string per marker, and the
+         day someone adds a store type whose id collides with a status id, mix stops
+         being enough on its own. */
+      const sig = [pinStyle, catMode, pos.lat, pos.lng, colour, scale, selIn, g.count, canDrag,
                    vague, stale, mix.map(x => x.id + ':' + x.count).join(','), title].join('|');
 
       let m = markers.get(key);
@@ -1297,6 +1418,16 @@ $('iconBox').onchange = e => {
   renderLegend();   // the swatches have to follow the map
   recompute();
 };
+$('catMode').onchange = e => {
+  setCatMode(e.target.value);
+  $('catModeNote').textContent = catMode !== 'stype' ? ''
+    : REAL
+      ? `Every one of your ${stores.length} stores is Unclassified: there is no store-type `
+        + `column in the CRM yet. Add it, fill it once, and these pins sort themselves.`
+      : 'Invented types on invented stores — the real export has no type column yet.';
+  renderLegend();
+  recompute();
+};
 $('undoBtn').onclick = undoMove;
 $('reviewBox').onchange = e => { reviewOnly = e.target.checked; recompute(); };
 
@@ -1306,6 +1437,8 @@ $('bulkBtn').onclick = () => {
   if (REAL) { log('already showing your real stores - nothing to simulate'); return; }
   if (stores.length > 500) return;
   const extra = makeBulkStores(2000 - stores.length);
+  // The new arrivals have to be coloured the way the map is coloured right now.
+  extra.forEach(s => { s.cat = catMode === 'stype' ? typeOf(s.stype).id : s.statusCat; });
   stores = stores.concat(extra);
   log(`+ loaded ${extra.length} stores (${stores.length} total)`);
   recompute();
@@ -1322,13 +1455,20 @@ $('addrBtn').onclick = () => {
 };
 $('refreshBtn').onclick = refreshChanged;
 
-$('nCat').innerHTML = CATEGORIES.map(c => `<option value="${c.id}">${c.label}</option>`).join('');
+fillCatSelect();
 $('addStore').onclick = () => {
   const name = $('nName').value.trim() || `New store ${stores.length + 1}`;
   const c = surface.center();
   const lat = parseFloat($('nLat').value) || c.lat + (Math.random() - .5) * .01;
   const lng = parseFloat($('nLng').value) || c.lng + (Math.random() - .5) * .01;
-  addStore(mk(name, $('nCat').value, lat, lng));
+  /* In store-type mode the dropdown is offering types, not statuses, so the value
+     goes to the type column and the status falls back to the default the CRM would
+     give a new record. Writing a type id into `statusCat` would put a category on
+     the store that no status filter can ever match. */
+  const pick = $('nCat').value;
+  addStore(catMode === 'stype'
+    ? mk(name, STATUS_CATEGORIES[0].id, lat, lng, 'geocoded', 'ROOFTOP', pick)
+    : mk(name, pick, lat, lng));
   $('nName').value = $('nLat').value = $('nLng').value = '';
 };
 

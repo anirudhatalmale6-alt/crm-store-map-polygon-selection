@@ -35,8 +35,8 @@ The selection engine is identical in both modes; only the tiles change.
 
 ```
 node test-selection.js        # 32 assertions on the selection + clustering engines
-python3 test_ui.py            # 80 assertions driving the real browser + screenshots
-python3 test_gmaps_surface.py # 43 assertions on the GOOGLE surface, with no API key
+python3 test_ui.py            # 93 assertions driving the real browser + screenshots
+python3 test_gmaps_surface.py # 53 assertions on the GOOGLE surface, with no API key
 node server/test_schema.js    # 42 assertions on the table/column config (no database)
 node server/test_geocoder.js  # 26 assertions on the geocoder (stubbed fetch, no cost)
 node server/test_api.js       # 89 assertions: real Express + real MySQL + real HTTP
@@ -44,7 +44,7 @@ node server/test_batch.js     # 53 assertions on the bulk geocoding run (real My
 node server/test_ventas.js    # 60 assertions against YOUR schema and YOUR 2,657 rows
 ```
 
-425 assertions. `test_ventas.js` is the one that matters most, because it is the
+448 assertions. `test_ventas.js` is the one that matters most, because it is the
 only suite whose inputs I did not choose — it runs over your actual data, and every
 correction listed under "Your actual database, measured" below was forced by it.
 
@@ -1080,3 +1080,111 @@ Grouped raw that is 69 layers; My Maps allows **10**. That is why the layers on
 your current map are hand-made composites like *Valle del Cauca/Nariño* and
 *Cundinamarca/Meta/Santander/Norte de Santander* — and why they have to be
 re-made by hand every time the list changes.
+
+## "If we have a dedicated column, can we have automatic differentiated pins?"
+
+Yes. It is built and it is in the map now — the **Colour pins by** dropdown at the
+top of the sidebar switches between *Status* (the columns you have today) and
+*Store type* (what the new column would drive).
+
+The types live in a table, not in the drawing code:
+
+```js
+const STORE_TYPES = [
+  { id:'drugstore',   label:'Drugstore',    color:'#4f9dff', glyph:GLYPH.plus },
+  { id:'orthopaedic', label:'Orthopaedic',  color:'#a78bfa', glyph:GLYPH.crutch },
+  { id:'supermarket', label:'Supermarket',  color:'#ffb454', glyph:GLYPH.cart },
+  { id:'distributor', label:'Distributor',  color:'#3ddc97', glyph:GLYPH.truck },
+  { id:'clinic',      label:'Clinic / IPS', color:'#22d3ee', glyph:GLYPH.bldg },
+  { id:'other',       label:'Other',        color:'#f472b6', glyph:GLYPH.star },
+];
+```
+
+That is deliberate. Adding *Veterinary* next year is an `INSERT` and a row here —
+something whoever maintains the CRM can do — not a code change and a deploy.
+
+Names and colours in that table are placeholders until you tell me the real list.
+They are not guesses at your data; they are the six words you used, wired up so you
+can see the mechanism working.
+
+### The part that actually needed care: the empty column
+
+The day the column is added, every one of your 2,423 rows is empty. So the lookup
+never returns nothing:
+
+```js
+const typeOf = v => typeById[v] || UNCLASSIFIED;
+```
+
+A store with an empty column, or a value nobody has added to the table yet, still
+gets a pin: grey, blank, counted in the legend, selectable by a polygon. The
+alternative — a lookup that returns `undefined` and a marker that is quietly
+skipped — is how a shop drops off a map for a year with no error anywhere and a
+total at the top that still looks plausible. Six assertions cover it, including the
+unknown-value case and the legend adding up to the whole database.
+
+Load the map on your real export today and switch to *Store type*: it says
+**Unclassified 2,423**. That is the honest picture of the day before the column is
+filled, and it is also the fallback being exercised on 2,423 real rows rather than
+on a fixture built to make it pass.
+
+### Two bugs this found, both invisible to a passing test
+
+**A hollow pin has to move its colour to the outline.** An imprecise pin is drawn
+hollow — the fill is dropped so it reads as unfinished. In icon mode the outline
+stayed dark, so a hollow pin was a dark shape on a dark map; and since Unclassified
+has no glyph by design, those pins were *invisible* while the readout said all
+2,423 were on the map. Nothing failed. The screenshot showed it. There are now
+assertions on both surfaces that no pin is dark-on-dark, and they go red if the
+outline colour is put back.
+
+**A demo fixture that could only reach two of six types.** The invented store types
+were assigned with `(i * 3) % 6`, and 3 shares a factor with 6, so the map only
+ever showed Orthopaedic and Clinic. Every count still added up. There is now a
+control positive asserting each type in the table has stores to draw — a check on
+the fixture, not the code.
+
+### How many shapes are useful
+
+About seven. Past that, colour stops separating them and the shapes get too small
+to read at map zoom — the pin is a 24-pixel box. If you end up with more store
+types than that, the honest answer is to group the long tail into *Other* rather
+than ship twenty shapes nobody can tell apart.
+
+## "I think we can leave Persons out of the map" — measured
+
+Filtering on `c_person_type = 'Person'` removes **129 of your 1,132 active stores**.
+It does not remove the people.
+
+Counted over the dump, 1,170 store rows (the 1,253 prospects have no tax id at all —
+the field is empty in every one of them, so nothing but the name says who they are):
+
+| | rows |
+|---|---|
+| store rows | 1,170 |
+| flagged `c_person_type = 'Person'` | 132 |
+| whose tax id is a **cédula** (`c_id_type = 13`) | 454 |
+| whose tax id is **not company-shaped** (not 9–10 digits starting 8 or 9) | **814** |
+| whose tax id is company-shaped | 356 |
+
+The two columns that both claim to answer "is this a person" **disagree on 324
+rows**: 323 are `Company` carrying a cédula, and one is a `Person` with a NIT.
+`Adoti Ingeniería SAS` is filed as `c_id_type = 13` while carrying the company NIT
+901417636 — so the document-type field is mistyped in places too.
+
+Before trusting the NIT-shape rule I ran a control on it. Of the 300 store names
+carrying a legal-form marker (SAS, Ltda, S.A., IPS, Fundación…), **288 — 96% — have
+a company-shaped NIT**. Of the 870 without one, **68 — 8% — do**. The rule tracks
+what the names say; it is still a heuristic and not a legal determination.
+
+What this means for the decision: **814 of your 1,170 stores trade under an
+individual's tax identity.** Most of them are shops with a trade name in brackets —
+`Luz Edith Isaza Correa (Abba Salud)` — but the registered party is a natural person
+and Ley 1581 does not care which column of your CRM says so. Publishing the shop
+name, the city and a coordinate is a different thing from publishing a person's home
+address, and a good number of these addresses are apartments (`APT 302`).
+
+So the filter is worth having, and it is not the safeguard it looks like. The
+safeguard is what the public feed carries: trade name, city, coordinate — never
+`c_nit`, `c_mail`, `c_phone`, `c_contact` or the street address. That holds whatever
+you decide about the 129.

@@ -344,6 +344,102 @@ with sync_playwright() as p:
            .every(m => !m.icon || typeof m.icon.url !== 'string'
                        || m.icon.url.includes('circle'))""") is True)
 
+    # ---------- pins driven by a store-type column ----------
+    types = page.evaluate("""() => ({
+      n: STORE_TYPES.length,
+      colours: [...new Set(TYPE_CATEGORIES.map(c => c.color))].length,
+      glyphs: [...new Set(STORE_TYPES.map(c => c.glyph.d))].length,
+      fallbackGlyph: UNCLASSIFIED.glyph,
+      all: TYPE_CATEGORIES.length,
+    })""")
+    ok("every store type has a colour and a shape of its own",
+       types["colours"] == types["all"] and types["glyphs"] == types["n"], types)
+    # Grey and blank is the point: Unclassified must not look like a type somebody
+    # chose, or an unfilled column reads on the map as a real answer.
+    ok("...and the Unclassified fallback deliberately has neither a glyph nor a type colour",
+       types["fallbackGlyph"] is None and types["all"] == types["n"] + 1, types)
+
+    # The signature trap again, in its nastiest form. Potential and Supermarket are
+    # both #ffb454, so for those stores switching the whole meaning of the map changes
+    # nothing but the SHAPE - and a signature that only knows about colour skips them.
+    # The demo set does not happen to contain such a store, so the case is BUILT
+    # rather than hoped for: a fixture that cannot express the bug cannot catch it.
+    page.uncheck("#clusterBox")
+    page.check("#iconBox")
+    same = page.evaluate("""() => {
+      let pair = null;
+      for (const sc of STATUS_CATEGORIES)
+        for (const t of STORE_TYPES)
+          if (sc.color === t.color) pair = pair || [sc.id, t.id];
+      if (!pair) return null;
+      const s = stores[0];
+      s.statusCat = pair[0]; s.cat = pair[0]; s.stype = pair[1];
+      recompute();
+      const shot = () => {
+        const m = window.__stub.markers.filter(m => !m._gone).find(m => m.title
+                    && m.title.startsWith(s.name));
+        return m && m.icon && m.icon.url;
+      };
+      return { name: s.name, pair, before: shot(), colour: catById[pair[0]].color };
+    }""")
+    ok("control positive: a store whose colour is identical in both modes exists to test",
+       same is not None and same["before"], same)
+    after_icon = page.evaluate("""(name) => {
+      setCatMode('stype'); renderLegend(); recompute();
+      const m = window.__stub.markers.filter(m => !m._gone).find(m => m.title
+                  && m.title.startsWith(name));
+      return m && m.icon && m.icon.url;
+    }""", same["name"])
+    # Same colour, different shape. A signature built out of colour alone says
+    # "unchanged" here and the pin keeps the wrong icon for the rest of the session.
+    # Two things in the signature stop that - catMode and the category id inside the
+    # cluster mix - so this assertion only goes red when BOTH are removed. Taking out
+    # either one on its own leaves it green, which is worth knowing before trusting it.
+    ok("...and its pin still changes shape when the colouring changes",
+       after_icon != same["before"] and same["colour"] in
+       page.evaluate("(u) => decodeURIComponent(u.split(',')[1])", after_icon),
+       (same["pair"], same["before"] == after_icon))
+    page.evaluate("() => { setCatMode('status'); renderLegend(); recompute(); }")
+    page.uncheck("#iconBox")
+    n_before = page.evaluate("window.__stub.markers.filter(m => !m._gone).length")
+    page.evaluate("() => { window.__calls = 0; }")
+    page.select_option("#catMode", "stype")
+    ok("switching to store-type colouring actually repaints the markers",
+       page.evaluate("window.__calls") > 0, page.evaluate("window.__calls"))
+    ok("...without inventing or losing a pin",
+       page.evaluate("window.__stub.markers.filter(m => !m._gone).length") == n_before,
+       f"{n_before} -> {page.evaluate('window.__stub.markers.filter(m => !m._gone).length')}")
+
+    page.check("#iconBox")
+    blank = page.evaluate("""() => {
+      const svgs = window.__stub.markers.filter(m => !m._gone)
+        .filter(m => m.icon && typeof m.icon.url === 'string')
+        .map(m => decodeURIComponent(m.icon.url.split(',')[1]));
+      const grey = svgs.filter(s => s.includes('fill="' + UNCLASSIFIED.color + '"'));
+      return { typed: svgs.length - grey.length, grey: grey.length,
+               paths: grey.length ? (grey[0].match(/<path/g) || []).length : 0 };
+    }""")
+    ok("stores with no type are on the map as blank grey pins",
+       blank["grey"] > 0 and blank["paths"] == 1, blank)
+    # Same guard as the offline surface: a hollow pin moves its colour from the fill to
+    # the outline, and if it does not, an Unclassified imprecise store is a dark shape
+    # on a dark map with no glyph - invisible, and counted as present.
+    ink = page.evaluate("""() => {
+      const DARK = ['#141a21', '#0f1216'];
+      const svgs = window.__stub.markers.filter(m => !m._gone)
+        .filter(m => m.icon && typeof m.icon.url === 'string')
+        .map(m => decodeURIComponent(m.icon.url.split(',')[1]));
+      const hollow = svgs.filter(s => s.includes('fill="#141a21"'));
+      return { hollow: hollow.length,
+               invisible: hollow.filter(s => DARK.some(d => s.includes('stroke="' + d + '"'))).length };
+    }""")
+    ok("control positive: the Google surface has hollow pins on it too", ink["hollow"] > 0, ink)
+    ok("...and none of them is dark on dark", ink["invisible"] == 0, ink)
+    ok("control positive: the typed stores are drawn as something else entirely",
+       blank["typed"] > 0, blank)
+    page.uncheck("#iconBox")
+    page.select_option("#catMode", "status")
+
     # ---------- a half-initialised map must not look like a working one ----------
     # Google builds the basemap first and everything we add to it second, so a throw
     # in the second half leaves the tiles on screen with the features behind them
