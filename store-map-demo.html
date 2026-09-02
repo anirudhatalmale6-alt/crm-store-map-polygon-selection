@@ -72,6 +72,9 @@
   /* Matches STALE_COLOR in the script: the badge in the list and the ring on the
      map have to be the same colour or they read as two unrelated problems. */
   .badge.stale{color:#ff7ad9;border-color:#ff7ad9}
+  /* Matches WRONG_COLOR. Red, because unlike the other two this pin is not
+     imprecise or out of date - it is in the wrong country. */
+  .badge.wrong{color:#ff6b6b;border-color:#ff6b6b}
   .badge{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;
          color:var(--accent);border:1px solid var(--accent);border-radius:99px;
          padding:0 6px;margin-left:5px;vertical-align:1px}
@@ -132,7 +135,7 @@
       <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;margin-top:10px">
         <input type="checkbox" id="clusterBox" checked> Cluster nearby pins
       </label>
-      <p class="hint">2,000 is the real size of your database. Clustering merges nearby
+      <p class="hint" id="scaleNote">2,000 is the real size of your database. Clustering merges nearby
          pins into a numbered bubble &mdash; click one on Google Maps to zoom into it.</p>
     </div>
 
@@ -153,7 +156,7 @@
         <span class="count" id="reviewCount">0</span>
       </label>
       <p class="hint" id="reviewNote"></p>
-      <p class="hint">Google reports how sure it was about every address. Rather than
+      <p class="hint" id="reviewWhy">Google reports how sure it was about every address. Rather than
          checking 2,000 pins, you check these &mdash; they are drawn hollow on the map.</p>
     </div>
 
@@ -191,6 +194,13 @@
     </div>
   </aside>
 </div>
+
+<!-- Your real stores, if an export is sitting next to this file.
+     `node server/export-map-data.js > map-data.js` writes it; when the file is not
+     there this tag simply does nothing and the page falls back to the demo set, so
+     the same page works with or without your database. The export is deliberately
+     NOT in the repository: it carries your store names and addresses. -->
+<script src="map-data.js"></script>
 
 <script>
 /* ------------------------------------------------------------------ *
@@ -254,14 +264,41 @@ if (typeof module !== 'undefined' && module.exports) {
 /* ------------------------------------------------------------------ *
  * 2. Demo data
  * ------------------------------------------------------------------ */
-/* Your three real categories. Colours chosen to stay distinguishable for the
-   most common form of colour blindness (red/green), which is why there is no
-   red-vs-green pair here. */
-const CATEGORIES = [
+/* Set by map-data.js when a real export is present. Everything below branches on
+   it exactly once, here, so there is one page and not two.
+
+   `?demo=1` forces the built-in Madrid set even when the export is sitting next to
+   the file. That switch is not a convenience: test_ui.py and test_gmaps_surface.py
+   assert on the 24 demo stores by name and count, and once an export exists on disk
+   they would quietly start testing a completely different data set - still green,
+   still measuring nothing anyone chose. */
+const FORCE_DEMO = typeof location !== 'undefined'
+  && new URLSearchParams(location.search).get('demo') === '1';
+const REAL = (!FORCE_DEMO && typeof window !== 'undefined' && window.__STORE_DATA__) || null;
+
+/* Colours chosen to stay distinguishable for the most common form of colour
+   blindness (red/green), which is why there is no red-vs-green pair here. */
+
+/* The categories your database can actually answer for today. `clients.type` is
+   ENUM('store','potential') and `clients.c_status` is 1/0, which is three buckets
+   and no more.
+
+   There is deliberately no 'Chain' here. Nothing in the schema says which stores
+   are chains — that was going to come from the spreadsheet you are still cleaning
+   up. A category with an invented rule behind it is worse than a missing one,
+   because on a map it looks just as authoritative. Adding it later is one line
+   in export-map-data.js. */
+const REAL_CATEGORIES = [
+  { id:'active',    label:'Active store',   color:'#3ddc97' },
+  { id:'potential', label:'Potential',      color:'#ffb454' },
+  { id:'inactive',  label:'Inactive store', color:'#8b97a6' },
+];
+const DEMO_CATEGORIES = [
   { id:'active',    label:'Active',    color:'#3ddc97' },
   { id:'potential', label:'Potential', color:'#ffb454' },
   { id:'chain',     label:'Chain',     color:'#4f9dff' },
 ];
+const CATEGORIES = REAL ? REAL_CATEGORIES : DEMO_CATEGORIES;
 const catById = Object.fromEntries(CATEGORIES.map(c => [c.id, c]));
 
 let nextId = 1;
@@ -289,6 +326,9 @@ const mk = (name, cat, lat, lng, src = 'geocoded', prec = 'ROOFTOP') => ({
    category colour, so a dashed amber ring would be indistinguishable from an
    imprecise Potential store at a glance. Solid ring, colour of its own. */
 const STALE_COLOR = '#ff7ad9';
+/* Red, and used nowhere else: a pin in the wrong country is not a shade of
+   "imprecise", it is the one kind of error that is simply wrong. */
+const WRONG_COLOR = '#ff6b6b';
 
 const VAGUE = new Set(['APPROXIMATE', 'GEOMETRIC_CENTER']);
 /* Google said it was not sure where this one is. */
@@ -296,8 +336,13 @@ const isVague = s => s.src === 'geocoded' && VAGUE.has(s.prec);
 /* The address was edited after the pin was placed, so the pin is on the old street.
    Renaming a store does NOT do this - only the address matters. */
 const isStale = s => s.locAddr != null && s.addr != null && s.addr !== s.locAddr;
-/* Both are jobs for a person, so both belong on the same short list. */
-const needsReview = s => isVague(s) || isStale(s);
+/* The pin is in a country the row does not claim. This one does NOT come from
+   Google's confidence — one of the three carries RANGE_INTERPOLATED, which reads
+   as confident, and is in Manhattan. A review list ordered by precision alone puts
+   the worst error in the batch at the bottom, so it needs its own reason. */
+const isWrongPlace = s => Boolean(s.wrong);
+/* All three are jobs for a person, so all three belong on the same short list. */
+const needsReview = s => isVague(s) || isStale(s) || isWrongPlace(s);
 
 let stores = [
   mk('Gran Vía 34',        'chain',     40.4203, -3.7058),
@@ -372,6 +417,23 @@ function makeBulkStores(n) {
                 d.lat + rad * Math.sin(a), d.lng + rad * Math.cos(a), 'geocoded', prec));
   }
   return out;
+}
+
+/* Real stores replace the demo set outright — they are not merged into it, because
+   a map holding 24 invented Madrid shops alongside your 2,423 real ones is a map
+   that lies in a way nobody would notice from the totals. */
+if (REAL) {
+  stores = REAL.stores.map(s => ({
+    id: s.id, name: s.name, cat: s.cat, lat: s.lat, lng: s.lng,
+    src: s.src || 'geocoded', prec: s.prec,
+    addr: s.addr,
+    // The pin WAS placed for this address, so it starts in agreement with itself.
+    // Anything else and every real store would show up stale on the first render.
+    locAddr: s.addr,
+    wrong: s.wrong, city: s.city, state: s.state,
+  }));
+  // Adding a store must not reuse a cl_id that already exists in your CRM.
+  nextId = stores.reduce((m, s) => Math.max(m, s.id), 0) + 1;
 }
 
 let polygon = [];      // [{lat,lng}]
@@ -451,9 +513,10 @@ function renderSelection() {
         <div class="store">
           <span class="dot" style="background:${catById[s.cat].color}"></span>
           <span style="flex:1;min-width:0">
-            <b>${s.name}</b>${s.src === 'manual' ? '<span class="badge">adjusted</span>' : ''}${isVague(s) ? '<span class="badge warn">check</span>' : ''}${isStale(s) ? '<span class="badge stale">address changed</span>' : ''}
+            <b>${s.name}</b>${s.src === 'manual' ? '<span class="badge">adjusted</span>' : ''}${isVague(s) ? '<span class="badge warn">check</span>' : ''}${isStale(s) ? '<span class="badge stale">address changed</span>' : ''}${isWrongPlace(s) ? '<span class="badge wrong">wrong country</span>' : ''}
             <small>${catById[s.cat].label} &middot; ${s.lat.toFixed(4)}, ${s.lng.toFixed(4)}</small>
             ${isStale(s) ? `<small style="color:${STALE_COLOR}">pin is at &ldquo;${s.locAddr}&rdquo;</small>` : ''}
+            ${isWrongPlace(s) ? `<small style="color:${WRONG_COLOR}">${s.wrong}</small>` : ''}
           </span>
           <button class="del" data-del="${s.id}" title="Delete from CRM">&times;</button>
         </div>`).join('')
@@ -616,7 +679,43 @@ function renderReview() {
 const OfflineSurface = (() => {
   const host = $('offline');
   // Wide enough to hold the full 2,000-store stress set, not just the 24 named ones.
-  const B = { minLat: 40.360, maxLat: 40.478, minLng: -3.775, maxLng: -3.625 };
+  const DEMO_B = { minLat: 40.360, maxLat: 40.478, minLng: -3.775, maxLng: -3.625 };
+
+  /* With real data the extent has to come FROM the data: Colombia is 17° tall and
+     this box was drawn around Madrid, so every pin would land off-canvas and the
+     page would look empty rather than broken.
+     ...but NOT from all of it. 17 of these stores are really in Chile, Nicaragua,
+     Italy, France and China, and a box that contains them spans 206° of longitude,
+     which draws Colombia as a smudge two pixels wide. The view is fitted to the
+     domestic rows — the ones your own data does not mark 'Internacional' — and the
+     other 17 are still there, still selectable, just off the initial view. */
+  const isAbroad = s => String(s.state || '').trim().toLowerCase() === 'internacional';
+
+  function boundsOf(list) {
+    let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+    for (const s of list) {
+      if (s.lat < minLat) minLat = s.lat;
+      if (s.lat > maxLat) maxLat = s.lat;
+      if (s.lng < minLng) minLng = s.lng;
+      if (s.lng > maxLng) maxLng = s.lng;
+    }
+    if (!Number.isFinite(minLat)) return { ...DEMO_B };
+    // A degree of longitude is shorter than a degree of latitude everywhere except
+    // the equator; ignoring that stretches the country sideways.
+    const pad = 0.04;
+    const dLat = Math.max(maxLat - minLat, 1e-4), dLng = Math.max(maxLng - minLng, 1e-4);
+    return {
+      minLat: minLat - dLat * pad, maxLat: maxLat + dLat * pad,
+      minLng: minLng - dLng * pad, maxLng: maxLng + dLng * pad,
+    };
+  }
+  /* The known-bad pins are left out of the extent as well. Two of the three are
+     NOT marked Internacional (that is exactly what makes them wrong), so without
+     this the canvas stretches from Bogotá to Manhattan to hold one pin that is
+     admitted to be in the wrong place, and half the map is empty ocean. They stay
+     in the data and in the review list - "Show only these" is how you reach them. */
+  const inView = REAL ? REAL.stores.filter(s => !isAbroad(s) && !s.wrong) : [];
+  const B = REAL ? boundsOf(inView.length ? inView : REAL.stores) : { ...DEMO_B };
   let W = 800, H = 600;
   let dragging = null;   // { s, circle } while a pin is being dragged
   let dragged  = false;  // did the pointer actually move between down and up?
@@ -664,6 +763,10 @@ const OfflineSurface = (() => {
           ${stale ? `<circle class="ring" data-sid="${s.id}" cx="${g.x}" cy="${g.y}"
                              r="${on ? 13 : 10}" fill="none" stroke="${STALE_COLOR}"
                              stroke-width="2" opacity=".95"
+                             pointer-events="none"/>` : ''}
+          ${isWrongPlace(s) ? `<circle class="ring" data-sid="${s.id}" cx="${g.x}" cy="${g.y}"
+                             r="${on ? 15 : 12}" fill="none" stroke="${WRONG_COLOR}"
+                             stroke-width="2.5" opacity=".95"
                              pointer-events="none"/>` : ''}
           <circle class="pin" data-sid="${s.id}" cx="${g.x}" cy="${g.y}" r="${on ? 9 : 6}"
                   fill="${vague ? 'none' : catById[s.cat].color}"
@@ -777,6 +880,9 @@ const OfflineSurface = (() => {
     endDraw()   { drawing = false; recompute(); },
     clear()     { polygon = []; drawing = false; recompute(); },
     center()    { return { lat: (B.minLat + B.maxLat) / 2, lng: (B.minLng + B.maxLng) / 2 }; },
+    /* Google Maps opens on the same extent as the preview, so switching surfaces
+       does not teleport you to a different country. */
+    bounds()    { return { ...B }; },
   };
 })();
 
@@ -785,10 +891,15 @@ const GoogleSurface = (() => {
   let map, markers = new Map(), gPoly = null, polySig = null;
 
   function init() {
+    const b = OfflineSurface.bounds();
     map = new google.maps.Map($('gmap'), {
-      center: { lat: 40.4200, lng: -3.7020 }, zoom: 13, mapTypeControl: false,
+      center: { lat: (b.minLat + b.maxLat) / 2, lng: (b.minLng + b.maxLng) / 2 },
+      zoom: 13, mapTypeControl: false,
       streetViewControl: false, fullscreenControl: false,
     });
+    /* fitBounds, not a fixed zoom: 13 is a city and this data set is a country. */
+    map.fitBounds(new google.maps.LatLngBounds(
+      { lat: b.minLat, lng: b.minLng }, { lat: b.maxLat, lng: b.maxLng }), 24);
     // Clustering depends on zoom, so re-cluster whenever the view settles.
     google.maps.event.addListener(map, 'idle', render);
 
@@ -981,6 +1092,9 @@ $('undoBtn').onclick = undoMove;
 $('reviewBox').onchange = e => { reviewOnly = e.target.checked; recompute(); };
 
 $('bulkBtn').onclick = () => {
+  // With the real export loaded there is nothing to simulate - the stress set exists
+  // to stand in for your database when your database is not here.
+  if (REAL) { log('already showing your real stores - nothing to simulate'); return; }
   if (stores.length > 500) return;
   const extra = makeBulkStores(2000 - stores.length);
   stores = stores.concat(extra);
@@ -1043,7 +1157,31 @@ window.__gmapReady = () => {
 window.addEventListener('resize', () => surface.render());
 OfflineSurface.show();
 recompute();
-log('Loaded 24 demo stores');
+if (REAL) {
+  /* The demo copy quotes 2,000 - the size I had to guess at before seeing your
+     database. Leaving it on screen next to the real counts would make the page
+     argue with itself. */
+  const abroad = stores.filter(s => String(s.state||'').trim().toLowerCase() === 'internacional').length;
+  const wrongN = stores.filter(isWrongPlace).length;
+  const total = REAL.pinned + REAL.notPlaced;
+  $('bulkBtn').textContent = `${REAL.pinned.toLocaleString()} stores loaded`;
+  $('scaleNote').innerHTML =
+    `<b>${REAL.pinned.toLocaleString()}</b> of your ${total.toLocaleString()} address rows are on the map. ` +
+    `Clustering merges nearby pins into a numbered bubble &mdash; click one on Google Maps to zoom into it.`;
+  $('reviewWhy').innerHTML =
+    `Google reports how sure it was about every address. Rather than checking ` +
+    `${REAL.pinned.toLocaleString()} pins, you check these &mdash; they are drawn hollow on the map. ` +
+    (wrongN ? `<b style="color:${WRONG_COLOR}">${wrongN}</b> of them are not imprecise but in the ` +
+              `wrong country, ringed in red; Google rated one of those as confident.` : '');
+  log(`Loaded ${REAL.pinned.toLocaleString()} geocoded stores from your CRM`);
+  log(`${REAL.notPlaced} rows have no coordinates yet`);
+  // The preview does not pan, so say where they are rather than telling anyone to
+  // go and look for them.
+  if (abroad) log(`${abroad} are genuinely abroad (Chile, Costa Rica, Italy...) - off this view`);
+  $('modeTag').textContent = 'your data, offline preview';
+} else {
+  log('Loaded 24 demo stores');
+}
 </script>
 </body>
 </html>

@@ -5,7 +5,10 @@ import json, os, re, sys
 from playwright.sync_api import sync_playwright
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-HTML = "file://" + os.path.join(HERE, "store-map-demo.html")
+# ?demo=1 pins the page to the 24 built-in stores. Without it, an exported
+# map-data.js sitting next to the file would silently replace the data set these
+# assertions describe.
+HTML = "file://" + os.path.join(HERE, "store-map-demo.html") + "?demo=1"
 SHOTS = os.path.join(HERE, "shots")
 os.makedirs(SHOTS, exist_ok=True)
 
@@ -47,6 +50,15 @@ with sync_playwright() as p:
     page.uncheck("#clusterBox")
 
     # ---------- baseline ----------
+    # Control positive for ?demo=1. "24 stores" also passes on a machine that has no
+    # export at all, which would make the switch look tested when it never ran. This
+    # says out loud whether the thing it overrides was actually present.
+    export = os.path.join(HERE, "map-data.js")
+    if os.path.exists(export):
+        ok("?demo=1 overrode a real export that is on disk", True)
+    else:
+        print("  ..   no map-data.js on disk - ?demo=1 was not exercised")
+
     total = len(page.query_selector_all("#offline svg circle"))
     ok("24 demo stores rendered as markers", total == 24, f"got {total}")
     ok("selection starts empty", page.text_content("#selCount") == "0")

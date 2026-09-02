@@ -34,7 +34,10 @@ import json, os, sys
 from playwright.sync_api import sync_playwright
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-HTML = "file://" + os.path.join(HERE, "store-map-demo.html")
+# ?demo=1 pins the page to the 24 built-in stores. Without it, an exported
+# map-data.js sitting next to the file would silently replace the data set these
+# assertions describe.
+HTML = "file://" + os.path.join(HERE, "store-map-demo.html") + "?demo=1"
 
 PASS = FAIL = 0
 def ok(name, cond, extra=""):

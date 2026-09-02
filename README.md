@@ -35,7 +35,7 @@ The selection engine is identical in both modes; only the tiles change.
 
 ```
 node test-selection.js        # 23 assertions on the selection + clustering engines
-python3 test_ui.py            # 75 assertions driving the real browser + screenshots
+python3 test_ui.py            # 76 assertions driving the real browser + screenshots
 python3 test_gmaps_surface.py # 20 assertions on the GOOGLE surface, with no API key
 node server/test_schema.js    # 42 assertions on the table/column config (no database)
 node server/test_geocoder.js  # 26 assertions on the geocoder (stubbed fetch, no cost)
@@ -44,7 +44,7 @@ node server/test_batch.js     # 53 assertions on the bulk geocoding run (real My
 node server/test_ventas.js    # 60 assertions against YOUR schema and YOUR 2,657 rows
 ```
 
-388 assertions. `test_ventas.js` is the one that matters most, because it is the
+389 assertions. `test_ventas.js` is the one that matters most, because it is the
 only suite whose inputs I did not choose — it runs over your actual data, and every
 correction listed under "Your actual database, measured" below was forced by it.
 
@@ -827,3 +827,77 @@ comes from.
 For a **store map** you want where the shop is, which is `client_address` — the
 column the location data is being added to. Still your call, but that is what the
 data says, and the full list of 34 is one query away if you want to eyeball it.
+
+## Milestone 2 — the map, drawn with your own stores
+
+The demo page no longer runs on 24 invented Madrid shops. It runs on your 2,423
+geocoded stores.
+
+```sh
+node server/export-map-data.js --port 13307 --db ventas --js > map-data.js
+# then open store-map-demo.html
+```
+
+`store-map-demo.html` loads `map-data.js` if it is sitting next to it and falls back
+to the demo set if it is not, so the same page works with or without your database.
+`map-data.js` is **not in this repository** and never will be — it carries your store
+names and addresses.
+
+Screenshots of this are sent to you in the Freelancer chat and are **not** in this
+repository either: they show real customer names, and several of your stores are
+registered to individual people rather than companies.
+
+### The categories are the ones your data can actually answer
+
+`clients.type` is `ENUM('store','potential')` and `clients.c_status` is 1/0, which
+gives exactly three buckets:
+
+| Category | Colour | Count |
+|---|---|---|
+| Active store | green | 1,132 |
+| Potential | amber | 1,253 |
+| Inactive store | grey | 38 |
+
+There is deliberately **no Chain category**. Nothing in the schema says which stores
+are chains — that was going to come from the spreadsheet you are cleaning up. A
+fourth colour with an invented rule behind it would look exactly as authoritative on
+the map as the three that are real. It is one line in `export-map-data.js` the day
+the rule exists.
+
+One number worth noticing: **every single `store` row is on the map** — 1,132 active
+and 38 inactive, 1,170 of 1,170. All 234 rows without coordinates are `potential`.
+The gap is entirely in prospects, not in stores you actually sell to.
+
+### Fitting the view to the data meant deciding what counts as an outlier
+
+The first version fitted the map to every pin. That box is 206° of longitude wide
+and draws Colombia as a smudge, because:
+
+- 17 stores are **genuinely abroad** — Chile, Peru, Paraguay, Costa Rica, Nicaragua,
+  the Dominican Republic, Italy, France, and one in Yiwu, China. All of them are
+  marked `Internacional` in your own data, all of them geocoded correctly.
+- 2 of the 3 wrong-country pins are **not** marked `Internacional` — that is exactly
+  what makes them wrong — so they stretched the box to Manhattan.
+
+The view is fitted to the domestic, not-known-wrong rows. The other 20 are still in
+the data, still selectable, still counted in the legend; "Show only these" is how you
+reach the bad ones. A map that fits itself to its own errors shows you the errors and
+hides everything else.
+
+### The review list has three reasons now, not two
+
+`APPROXIMATE`/`GEOMETRIC_CENTER` (Google was unsure), address-changed (the pin is on
+the old street), and **wrong country** — ringed in red, listed with the reason. The
+third one exists because Google's confidence does not catch it: one of those three
+pins came back `RANGE_INTERPOLATED`, which reads as confident, and is in Manhattan.
+571 pins in the list; 570 from precision, 1 that only the country check found.
+
+### `?demo=1`
+
+Forces the built-in Madrid set even when an export is present. Not a convenience:
+`test_ui.py` and `test_gmaps_surface.py` assert on the 24 demo stores by name and
+count, and the moment a real `map-data.js` existed on disk they would have quietly
+started testing a different data set — still green, still measuring nothing anyone
+chose. Both suites now pin themselves with it, and `test_ui.py` prints whether the
+export was actually there to be overridden, so the switch cannot pass by being
+irrelevant.

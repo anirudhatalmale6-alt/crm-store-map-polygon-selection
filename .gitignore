@@ -1,2 +1,7 @@
 node_modules/
 package-lock.json
+map-data.js
+map-data.json
+
+# Real-data renders. These show your customers by name.
+shots/*-real-*.png
