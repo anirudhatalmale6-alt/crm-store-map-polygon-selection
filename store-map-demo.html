@@ -1145,7 +1145,33 @@ $('loadGoogle').onclick = () => {
 window.__gmapReady = () => {
   surface = GoogleSurface;
   surface.show();
-  GoogleSurface.init();
+  /* init() has to be able to fail out loud.
+   *
+   * Google constructs the basemap first and builds our markers, listeners and
+   * drawing tools after it. So when anything in the second half throws - a class
+   * they retired, a service the key is not entitled to - the tiles are ALREADY on
+   * screen. The page then looks completely normal while the features below the
+   * throw are dead, and the only visible trace is that the badge and the banner
+   * still say "offline preview" over a live Google map.
+   *
+   * That is not a hypothetical: it is the state the client photographed. A silent
+   * half-initialised map is worse than no map, so on failure go back to the
+   * surface that fully works and put the actual error where they can read it -
+   * they should not have to open a developer console to find out. */
+  try {
+    GoogleSurface.init();
+  } catch (err) {
+    surface = OfflineSurface;
+    OfflineSurface.show();
+    $('modeTag').textContent = 'Google Maps failed';
+    $('banner').innerHTML =
+      'Google Maps loaded but could not be set up, so the map below is the offline ' +
+      'preview again &mdash; selection still works. Google said: <b>' +
+      String(err && err.message || err).replace(/[<&]/g, c => c === '<' ? '&lt;' : '&amp;') + '</b>';
+    log('Google Maps init failed: ' + (err && err.message || err));
+    recompute();
+    return;
+  }
   $('modeTag').textContent = 'Google Maps';
   $('banner').textContent = 'Live Google Maps basemap. Draw polygon → click each corner on the map, ' +
                             'then Finish polygon. Drag a corner afterwards to adjust the selection.';

@@ -36,7 +36,7 @@ The selection engine is identical in both modes; only the tiles change.
 ```
 node test-selection.js        # 23 assertions on the selection + clustering engines
 python3 test_ui.py            # 76 assertions driving the real browser + screenshots
-python3 test_gmaps_surface.py # 20 assertions on the GOOGLE surface, with no API key
+python3 test_gmaps_surface.py # 26 assertions on the GOOGLE surface, with no API key
 node server/test_schema.js    # 42 assertions on the table/column config (no database)
 node server/test_geocoder.js  # 26 assertions on the geocoder (stubbed fetch, no cost)
 node server/test_api.js       # 89 assertions: real Express + real MySQL + real HTTP
@@ -44,7 +44,7 @@ node server/test_batch.js     # 53 assertions on the bulk geocoding run (real My
 node server/test_ventas.js    # 60 assertions against YOUR schema and YOUR 2,657 rows
 ```
 
-389 assertions. `test_ventas.js` is the one that matters most, because it is the
+395 assertions. `test_ventas.js` is the one that matters most, because it is the
 only suite whose inputs I did not choose — it runs over your actual data, and every
 correction listed under "Your actual database, measured" below was forced by it.
 
@@ -901,3 +901,34 @@ started testing a different data set — still green, still measuring nothing an
 chose. Both suites now pin themselves with it, and `test_ui.py` prints whether the
 export was actually there to be overridden, so the switch cannot pass by being
 irrelevant.
+
+## "It shows a Google map but still says offline preview"
+
+You sent a screenshot of exactly that: live Google tiles, and both the badge and
+the banner still reading *offline preview*. Those two cannot both be true, so it
+is worth saying what it actually means.
+
+Google builds the basemap first, and everything we hang on it — markers, the
+`idle` listener that re-clusters on zoom, the click handler that places polygon
+corners — is built after. So a throw anywhere in that second half happens with
+the tiles **already on screen**. The map looks finished. What died is whatever
+came after the throw, silently, and the only visible trace was that the label
+never got updated.
+
+This is the same failure as the DrawingManager one further up, wearing a
+different hat: a retired vendor API throws, it does not warn.
+
+Reproduced with a stub whose `Marker` throws — same signature as the screenshot,
+badge and banner both stuck on offline preview while `#gmap` was the visible
+surface. `init()` is now wrapped: on failure the page drops back to the offline
+surface, which fully works, and prints Google's own error message in the banner
+instead of making you open a developer console. Six assertions in
+`test_gmaps_surface.py` cover it, including a control positive that the injected
+failure actually fired — without it, "the badge does not say offline preview"
+would pass on a page that loaded perfectly.
+
+`shots/14-google-init-failed.png` is what it looks like now.
+
+To find out which call it was on your machine: open the page, press F12, click
+Load Google Maps, and read the red line in the Console tab. With this build the
+banner will simply tell you.

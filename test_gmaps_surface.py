@@ -180,6 +180,44 @@ with sync_playwright() as p:
     ok("clear resets the selection", page.text_content("#selCount") == "0")
 
     ok("no uncaught javascript errors during the whole run", not errors, errors)
+
+    # ---------- a half-initialised map must not look like a working one ----------
+    # Google builds the basemap first and everything we add to it second, so a throw
+    # in the second half leaves the tiles on screen with the features behind them
+    # dead. The client photographed exactly that: a live Google basemap with the
+    # badge and banner still reading "offline preview". Nothing failed loudly.
+    page2 = browser.new_page(viewport={"width": 1280, "height": 720})
+    page2.goto(HTML)
+    page2.wait_for_selector("#offline svg circle")
+    page2.evaluate(STUB)
+    # Marker stands in for ANY class retired after the map itself is constructed.
+    # Overriding it after the stub is built keeps this independent of the stub's
+    # internals - the point is the throw, not which class does the throwing.
+    # Wrapped in a statement body on purpose: an expression whose VALUE is a
+    # function gets called by page.evaluate rather than merely assigned.
+    page2.evaluate("() => { window.google.maps.Marker = function () "
+                   "{ throw new TypeError('google.maps.Marker is not a constructor'); }; }")
+    page2.evaluate("window.__gmapReady()")
+
+    tag2 = page2.text_content("#modeTag").strip()
+    ok("a failed init does not leave the badge claiming offline preview",
+       tag2 != "offline preview", tag2)
+    ok("...it says the Google surface failed", "fail" in tag2.lower(), tag2)
+    ok("...and the banner carries Google's own error text, not a generic message",
+       "Marker is not a constructor" in page2.text_content("#banner"),
+       page2.text_content("#banner")[:90])
+    ok("...and the user is put back on the surface that fully works",
+       page2.eval_on_selector("#offline", "e => getComputedStyle(e).display") == "block"
+       and page2.eval_on_selector("#gmap", "e => getComputedStyle(e).display") == "none")
+    # Control positive: this all has to be reachable, i.e. the stub really did break
+    # init. If Marker had quietly worked, the four assertions above would be judging
+    # a successful load and the "offline preview" one would pass for free.
+    ok("control positive: the injected failure actually fired",
+       page2.evaluate("window.__stub.markers.length") == 0,
+       page2.evaluate("window.__stub.markers.length"))
+    ok("...and selection still works on the surface it fell back to",
+       page2.evaluate("document.querySelectorAll('#offline svg circle').length") > 0)
+
     browser.close()
 
 print(f"\n{PASS} passed, {FAIL} failed")
