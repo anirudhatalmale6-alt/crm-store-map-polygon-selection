@@ -49,8 +49,15 @@
   #offline{position:absolute;inset:0}
   #offline svg{width:100%;height:100%;display:block;cursor:crosshair}
   .toolbar{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:5;
-           display:flex;gap:8px;background:rgba(23,28,34,.94);border:1px solid var(--line);
+           display:flex;gap:8px;align-items:center;background:rgba(23,28,34,.94);
+           border:1px solid var(--line);
            padding:7px;border-radius:9px;backdrop-filter:blur(6px)}
+  /* The toggle made the strip wider and the two buttons wrapped onto two lines. */
+  .toolbar button{white-space:nowrap}
+  .tool-toggle{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);
+               padding:0 8px 0 4px;cursor:pointer;white-space:nowrap;
+               border-left:1px solid var(--line)}
+  .tool-toggle input{cursor:pointer}
   .banner{position:absolute;bottom:12px;left:12px;z-index:5;font-size:11px;color:var(--muted);
           background:rgba(23,28,34,.94);border:1px solid var(--line);padding:5px 9px;border-radius:6px}
   .store{display:flex;gap:9px;align-items:flex-start;padding:8px;border-radius:7px;
@@ -91,7 +98,10 @@
          color:var(--accent);border:1px solid var(--accent);border-radius:99px;
          padding:0 6px;margin-left:5px;vertical-align:1px}
   #offline svg .pin{cursor:grab}
-  .perfbar{position:absolute;top:14px;right:14px;z-index:5;pointer-events:none;
+  /* Bottom-right, not top-right: the toolbar grew a toggle, and up there this strip
+     was printing itself straight across the toggle's label. It reads over the map
+     just as well from down here, and it is nowhere near a control. */
+  .perfbar{position:absolute;bottom:14px;right:14px;z-index:5;pointer-events:none;
            font-size:11px;color:var(--muted);background:rgba(15,18,22,.72);
            border:1px solid var(--line);border-radius:99px;padding:4px 11px;
            font-variant-numeric:tabular-nums}
@@ -160,9 +170,7 @@
     <div class="section">
       <h2>Scale</h2>
       <button class="ghost" id="bulkBtn" style="width:100%">Load 2,000 stores</button>
-      <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;margin-top:10px">
-        <input type="checkbox" id="clusterBox" checked> Cluster nearby pins
-      </label>
+      <p class="hint" id="clusterNote"></p>
       <p class="hint" id="scaleNote">2,000 is the real size of your database. Clustering merges nearby
          pins into a numbered bubble &mdash; click one on Google Maps to zoom into it.</p>
     </div>
@@ -195,9 +203,17 @@
   </aside>
 
   <div id="mapwrap">
+    <!-- Clustering lives HERE, next to the polygon buttons, and not in a panel down
+         in the sidebar. It used to be in "Scale", the fourth section down, 625px
+         below the fold behind two simulator panels - which is to say it may as well
+         not have existed. The moment it is wanted is while drawing a polygon, and
+         this is what you are looking at then. -->
     <div class="toolbar">
       <button class="primary" id="drawBtn">Draw polygon</button>
       <button class="ghost" id="clearBtn">Clear selection</button>
+      <label class="tool-toggle" title="Merge pins that sit on top of each other into one numbered bubble">
+        <input type="checkbox" id="clusterBox" checked> Group nearby pins
+      </label>
     </div>
     <!-- pointer-events:none, or this floating strip eats clicks meant for the map -->
     <div class="perfbar" id="perf"></div>
@@ -1677,7 +1693,26 @@ $('drawBtn').onclick = () => {
 };
 $('clearBtn').onclick = () => { surface.clear(); $('drawBtn').textContent = 'Draw polygon'; };
 
-$('clusterBox').onchange = e => { clustering = e.target.checked; recompute(); };
+/* Grouping off means one marker per store, and on this database that is 2,423 of them
+   rather than the ~60 bubbles a grouped country view draws. The selection maths does
+   not change - it always ran per store, never per bubble, which is why the same
+   polygon selects the same stores either way. What changes is how much work a redraw
+   is, and a polygon corner fires a redraw on every mouse move: measured over a
+   20-step drag on the real data, 70 marker updates grouped against 1,905 ungrouped.
+   That is survivable, and it is the honest reason the box starts ticked rather than a
+   claim that grouping is better. Say the number instead of hiding the control. */
+$('clusterBox').onchange = e => {
+  clustering = e.target.checked;
+  recompute();
+  const n = stores.length;
+  $('clusterNote').innerHTML = clustering
+    ? `Nearby pins are merged into one numbered bubble. Untick <b>Group nearby pins</b> ` +
+      `on the map to see all ${n.toLocaleString()} separately &mdash; the polygon selects ` +
+      `the same stores either way.`
+    : `Every store is its own pin &mdash; ${n.toLocaleString()} of them. Dragging a polygon ` +
+      `corner has to update all the ones on screen, so it is heavier than grouped. ` +
+      `Selection is identical.`;
+};
 $('iconBox').onchange = e => {
   pinStyle = e.target.checked ? 'icon' : 'dot';
   renderLegend();   // the swatches have to follow the map

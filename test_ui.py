@@ -400,6 +400,80 @@ with sync_playwright() as p:
     ok("clustering draws far fewer shapes than one-per-store",
        drawn_clustered < drawn_plain / 2, f"clustered={drawn_clustered} plain={drawn_plain}")
 
+    # ---------- the grouping toggle has to be FINDABLE, not merely present ----------
+    # The customer asked for a control that already existed and had worked from the
+    # first version. It sat in the fourth sidebar section, 625px below the fold behind
+    # two simulator panels, so in practice it did not exist. Every behavioural
+    # assertion above stayed green throughout, because Playwright reaches a control by
+    # selector whether or not a human could ever have found it. Hence: assert it is on
+    # screen without scrolling, and that it is the thing under its own coordinates -
+    # a floating toolbar or banner sitting over it would be the same bug again.
+    vis = page.evaluate("""() => {
+      const el = document.getElementById('clusterBox');
+      const lab = el.closest('label');
+      const r = lab.getBoundingClientRect();
+      /* Sample the WHOLE label, not the middle of the checkbox. Checked once with the
+         perf readout still pinned top-right: it printed itself straight across the
+         words "Group nearby pins" while the box itself, over at the left edge, was
+         perfectly clickable - so a probe at the checkbox's centre passed on a control
+         whose name was unreadable. A covered LABEL is a control nobody finds, which is
+         the entire bug being fixed here. */
+      let covered = 0, pts = 0;
+      for (let fx = 0.06; fx < 1; fx += 0.08) {
+        const x = r.x + r.width * fx, y = r.y + r.height / 2;
+        const hit = document.elementFromPoint(x, y);
+        pts++;
+        if (!(hit === lab || lab.contains(hit))) covered++;
+      }
+      /* elementFromPoint alone is the WRONG INSTRUMENT here and passed the whole time
+         the label was unreadable. The perf readout carries pointer-events:none, so a
+         hit test looks straight THROUGH it and returns the label underneath - the
+         probe reports "nothing covering it" about something printed right across it.
+         Anything that paints over a control has to be caught geometrically, by
+         overlapping rectangles, whether or not it can be clicked. */
+      const overlaps = [...document.querySelectorAll('.perfbar, .banner')]
+        .filter(o => !o.contains(lab) && !lab.contains(o))
+        .filter(o => { const b = o.getBoundingClientRect();
+          return b.width && b.height && b.left < r.right && b.right > r.left
+                                     && b.top < r.bottom && b.bottom > r.top; })
+        .map(o => o.className);
+      return { top: Math.round(r.top), bottom: Math.round(r.bottom),
+               vh: window.innerHeight, w: Math.round(r.width),
+               onScreen: r.top >= 0 && r.bottom <= window.innerHeight && r.width > 0,
+               covered, pts, overlaps,
+               nearPolygonButton: Math.abs(
+                 r.top - document.getElementById('drawBtn').getBoundingClientRect().top) < 40 };
+    }""")
+    ok("the grouping toggle is on screen without scrolling", vis["onScreen"], vis)
+    ok("...and nothing is printed across its label",
+       vis["covered"] == 0 and not vis["overlaps"], vis)
+    ok("...and it sits with the polygon buttons, where it is wanted",
+       vis["nearPolygonButton"], vis)
+
+    # Grouping is a DISPLAY choice. If it ever changed what a polygon selects, the
+    # count in the panel would depend on a checkbox about pictures - so both modes are
+    # run over the same polygon and compared.
+    # The box is derived from the data and padded, so it holds EVERY store. A polygon
+    # over one district passes this by luck: whichever store a bug drops is probably
+    # outside it anyway. Checked - with the selection deliberately made to depend on
+    # the checkbox, a district-sized polygon still came back identical.
+    same = page.evaluate("""() => {
+      const la = stores.map(s => s.lat), ln = stores.map(s => s.lng);
+      const p = 0.01, N = Math.max(...la)+p, S = Math.min(...la)-p,
+                      E = Math.max(...ln)+p, W = Math.min(...ln)-p;
+      const poly = [{lat:S,lng:W},{lat:S,lng:E},{lat:N,lng:E},{lat:N,lng:W}];
+      const run = on => { clustering = on; polygon = poly.slice(); recompute();
+                          return [...selectedIds].sort((a,b)=>a-b); };
+      const grouped = run(true), plain = run(false);
+      return { grouped: grouped.length, plain: plain.length, total: stores.length,
+               identical: grouped.length === plain.length
+                          && grouped.every((v,i) => v === plain[i]) };
+    }""")
+    ok("the same polygon selects the same stores grouped or not",
+       same["identical"] and same["grouped"] > 0, same)
+    ok("control positive: the box really did cover every store",
+       same["grouped"] == same["total"], same)
+
     # Select a big chunk of the city and time it, unclustered = worst case.
     box = page.locator("#offline").bounding_box()
     page.click("#drawBtn")
