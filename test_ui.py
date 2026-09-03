@@ -524,6 +524,129 @@ with sync_playwright() as p:
     ok("...with every store back on its own status, not stuck on its type",
        page.evaluate("stores.every(s => s.cat === s.statusCat)"))
 
+    # ---------- subcategories folded into their parent ----------
+    # "Can we add subcategories later, if we start selling to Baby Stores?" The two
+    # modes are two groupings of ONE column, so the only thing that must never change
+    # between them is the number of stores on the map.
+    page.select_option("#catMode", "stype")
+    fine = page.evaluate("""() => {
+      const c = {}; stores.forEach(s => c[s.cat] = (c[s.cat] || 0) + 1);
+      return { counts: c, total: stores.length, cats: CATEGORIES.map(x => x.id) };
+    }""")
+    page.select_option("#catMode", "grouped")
+    coarse = page.evaluate("""() => {
+      const c = {}; stores.forEach(s => c[s.cat] = (c[s.cat] || 0) + 1);
+      return { counts: c, total: stores.length, cats: CATEGORIES.map(x => x.id),
+               // Where a subcategory store ended up, by name rather than by count -
+               // a count alone cannot tell "folded into the parent" from "dropped
+               // and replaced by somebody else's store".
+               babiesNowSupermarket: stores.filter(s => s.stype === 'babystore')
+                                           .every(s => s.cat === 'supermarket'),
+               anyBabyBucket: CATEGORIES.some(x => x.id === 'babystore') };
+    }""")
+    ok("folding subcategories up keeps every store on the map",
+       sum(coarse["counts"].values()) == coarse["total"] == sum(fine["counts"].values()),
+       f'{sum(coarse["counts"].values())} vs {coarse["total"]}')
+    ok("...with Baby store counted as Supermarket, not as a bucket of its own",
+       coarse["babiesNowSupermarket"] and not coarse["anyBabyBucket"], coarse["cats"])
+    ok("...and the Supermarket bucket grew by exactly the subcategories put into it",
+       coarse["counts"].get("supermarket", 0)
+       == fine["counts"].get("supermarket", 0) + fine["counts"].get("babystore", 0)
+       + fine["counts"].get("petshop", 0),
+       f'grouped={coarse["counts"].get("supermarket")} separate={fine["counts"]}')
+    ok("control positive: there were subcategory stores to fold in the first place",
+       fine["counts"].get("babystore", 0) > 0 and fine["counts"].get("petshop", 0) > 0,
+       fine["counts"])
+
+    # ---------- the client's own pin artwork ----------
+    page.select_option("#catMode", "stype")
+    page.check("#artBox")
+    page.wait_for_function("() => ICON_STATE.size > 0")
+    art = page.evaluate("""() => {
+      const pins = [...document.querySelectorAll('#offline svg g.pin')];
+      return {
+        state: Object.fromEntries(ICON_STATE),
+        withImage: pins.filter(g => g.querySelector('image')).length,
+        pins: pins.length,
+        // The type whose artwork is deliberately unloadable. Its stores must still be
+        // drawn, and drawn with the built-in shape - not skipped, and not blank.
+        petPins: stores.filter(s => s.stype === 'petshop').length,
+        petDrawnWithGlyph: pinSvg(typeById['petshop']).includes(GLYPH.paw.d),
+        petHasNoImage: !pinSvg(typeById['petshop']).includes('<image'),
+        goodHasImage: pinSvg(typeById['drugstore']).includes('<image'),
+      };
+    }""")
+    ok("a type can carry your own artwork instead of a built-in shape",
+       art["goodHasImage"] and art["withImage"] > 0, art)
+    ok("control positive: one of the sample icons is deliberately broken",
+       art["state"].get("petshop") == "bad", art["state"])
+    ok("...and its stores keep their pins, drawn with the built-in shape",
+       art["petPins"] > 0 and art["petDrawnWithGlyph"] and art["petHasNoImage"], art)
+    shot("11-custom-artwork.png")
+    page.uncheck("#artBox")
+    page.wait_for_function("() => [...ICON_STATE.values()].length === 0 || true")
+    ok("turning it back off restores the built-in shapes",
+       page.evaluate("() => !pinSvg(typeById['drugstore']).includes('<image')"))
+
+    # ---------- what the polygon hands back ----------
+    page.select_option("#catMode", "status")
+    page.uncheck("#iconBox")
+    contact = page.evaluate("""() => {
+      const s = stores[0];
+      selectedIds = new Set([s.id]);
+      renderSelection();
+      const html = document.getElementById('selList').innerHTML;
+      return { phone: s.phone, mail: s.mail,
+               hasPhone: html.includes(s.phone),
+               hasAddr: html.includes(s.addr),
+               shownForMissing: html.includes('no e-mail on record')
+                                || html.includes(s.mail) };
+    }""")
+    ok("selecting a store hands back its phone and address, not just its name",
+       contact["hasPhone"] and contact["hasAddr"], contact)
+    # A blank column and a broken page look identical in a list. On the real export
+    # 1,253 of 2,423 pinned rows have no e-mail at all, so this is the common case,
+    # not the edge one.
+    ok("...and says so out loud when a contact field is empty in the CRM",
+       contact["shownForMissing"], contact)
+
+    # ---------- the CSV your team opens in Excel ----------
+    # Three hazards, all of them present in the real export, all fed in at once.
+    csv = page.evaluate("""() => {
+      const s = { id: 4268, name: 'Wheelchairs "Emiro"', cat: 'active',
+                  phone: '+573174371165', contact: 'Maria Juliana, Yosely',
+                  mail: '', addr: 'CR 70 C 55 33, Cali', city: 'Cali',
+                  lat: 3.44, lng: -76.48, prec: 'ROOFTOP' };
+      const text = csvOf([s]);
+      const body = text.split('\\r\\n')[1];
+      // Count fields the way a CSV reader does, so an unescaped quote or comma shows
+      // up as the wrong number of columns rather than as text that merely looks odd.
+      let n = 1, q = false;
+      for (let i = 0; i < body.length; i++) {
+        const c = body[i];
+        if (c === '"') { if (q && body[i + 1] === '"') i++; else q = !q; }
+        else if (c === ',' && !q) n++;
+      }
+      return { header: text.split('\\r\\n')[0].replace(/^\\uFEFF/, ''),
+               bom: text.charCodeAt(0) === 0xFEFF,
+               fields: n,
+               cols: text.split('\\r\\n')[0].replace(/^\\uFEFF/, '').split(',').length,
+               phoneCell: body.split('","')[3],
+               keepsQuotes: body.includes('Wheelchairs ""Emiro""') };
+    }""")
+    ok("the CSV carries phone, contact, e-mail and address as columns",
+       all(c in csv["header"] for c in ("phone", "contact", "email", "address")),
+       csv["header"])
+    ok("a name with quotes in it does not shift every later column",
+       csv["fields"] == csv["cols"] and csv["keepsQuotes"], csv)
+    # 241 of the real phone numbers start with '+', which Excel reads as a formula and
+    # renders as #NAME?. The row is intact either way, so only looking at the cell
+    # catches this.
+    ok("a phone number starting with + is not handed to Excel as a formula",
+       csv["phoneCell"].startswith("'+57"), csv["phoneCell"])
+    ok("...and the file starts with a BOM so accents survive Excel on Windows",
+       csv["bom"], csv)
+
     ok("no uncaught javascript errors on the page", not errors, errors)
     browser.close()
 

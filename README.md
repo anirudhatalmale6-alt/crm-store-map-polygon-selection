@@ -35,8 +35,9 @@ The selection engine is identical in both modes; only the tiles change.
 
 ```
 node test-selection.js        # 32 assertions on the selection + clustering engines
-python3 test_ui.py            # 93 assertions driving the real browser + screenshots
-python3 test_gmaps_surface.py # 53 assertions on the GOOGLE surface, with no API key
+python3 test_ui.py            # 107 assertions driving the real browser + screenshots
+python3 test_gmaps_surface.py # 59 assertions on the GOOGLE surface, with no API key
+node server/test_export.js    # 21 assertions on what each export is allowed to carry
 node server/test_schema.js    # 42 assertions on the table/column config (no database)
 node server/test_geocoder.js  # 26 assertions on the geocoder (stubbed fetch, no cost)
 node server/test_api.js       # 89 assertions: real Express + real MySQL + real HTTP
@@ -44,7 +45,7 @@ node server/test_batch.js     # 53 assertions on the bulk geocoding run (real My
 node server/test_ventas.js    # 60 assertions against YOUR schema and YOUR 2,657 rows
 ```
 
-448 assertions. `test_ventas.js` is the one that matters most, because it is the
+489 assertions. `test_ventas.js` is the one that matters most, because it is the
 only suite whose inputs I did not choose — it runs over your actual data, and every
 correction listed under "Your actual database, measured" below was forced by it.
 
@@ -1188,3 +1189,134 @@ So the filter is worth having, and it is not the safeguard it looks like. The
 safeguard is what the public feed carries: trade name, city, coordinate — never
 `c_nit`, `c_mail`, `c_phone`, `c_contact` or the street address. That holds whatever
 you decide about the 129.
+
+## "Can I share the pins to use, or are we obliged to use predefined ones?"
+
+Your own. A type row carries an optional `icon`, and when it is there it is drawn
+instead of the built-in shape. Tick **Use my own pin artwork** to see the hook
+working — three of the sample types get artwork, and the fourth is deliberately
+given a broken image so you can watch what happens to it.
+
+One constraint that is not a preference and cannot be worked around. The Google
+marker is a picture this page builds, and a picture cannot reach out to the
+network for a second picture. So your artwork has to be **inline** — the file's
+own bytes carried in the row, not a link to a file on a server. That conversion
+is a one-off when you hand me the files; after it, the icon behaves like any other
+column. `test_gmaps_surface.py` asserts that no marker ever references `http(s)`,
+because one that did would draw an empty pin and nothing would say so.
+
+What to send, so the artwork survives being a map pin: square, transparent
+background, legible at 30 pixels — about the size of a fingernail. A logo with
+readable text on it will not be readable here at any zoom.
+
+**A broken icon must not cost you a store.** Setting an image on a marker and the
+image *arriving* are two different claims — the attribute is there either way — so
+each icon is loaded once, on purpose, and only one that decoded is allowed to be
+drawn. Pet shop's sample artwork is unloadable and its stores keep their pins,
+drawn with the built-in paw. Three assertions cover it, including the control
+positive that the broken one really did fail to load; without that, the test
+would pass on a page where no artwork was ever tried.
+
+## "Can we add subcategories in the future, if we start selling to Baby Stores?"
+
+Yes. A subcategory is a row with a `parent`:
+
+```js
+{ id:'babystore', label:'Baby store', parent:'supermarket', glyph:GLYPH.baby },
+```
+
+It inherits Supermarket's colour and carries its own shape, and the dropdown gains
+a third setting — **subcategories folded in** — that counts Baby store and Pet shop
+as Supermarket. Same column, two groupings, one dropdown between them.
+
+That split is the design and it is not arbitrary. A map has room for about seven
+colours before two of them start being argued over at a distance, and you pass
+seven the moment subcategories exist. Shapes do not run out the same way. So
+**colour answers "which part of the business", shape answers "which exact kind of
+shop"**. Twenty subcategories in five colours stays readable; twenty colours does
+not.
+
+Four assertions, and the one that matters is conservation: the number of stores on
+the map is identical in both groupings, and Supermarket grows by exactly the
+subcategories folded into it — checked by where the Baby store rows *went*, not by
+a count, because a count cannot tell "folded into the parent" from "dropped and
+replaced by somebody else's stores".
+
+## "Once you select the polygon, can you retrieve phone, e-mail and address?"
+
+Yes, and it is in. Each store in the list now shows its phone, contact person,
+e-mail and street, and the CSV carries them as columns. Measured on your own
+2,423 pinned rows first, because the answer to "is it easy" depends on whether the
+data is there:
+
+| field | filled | of 2,423 |
+|---|---:|---:|
+| phone | 2,423 | 100% |
+| street address | 2,419 | 99.8% |
+| e-mail | 1,170 | 48.3% |
+| contact person | 934 | 38.5% |
+
+The e-mail number is not random: **every one of the 1,170 is a `store`, and not one
+of the 1,253 `potential` rows has an e-mail at all.** So a polygon drawn over a
+prospecting area comes back with phones and addresses and an empty e-mail column —
+which is a fact about your CRM, not a failure of the export. The page says so out
+loud, per store and again on export, because a blank column and a broken page look
+identical in a list.
+
+Two things worth knowing before you use the addresses: only 902 rows have anything
+in `clients.c_address` — the real address lives in `client_address`, which is why
+that is the table the map reads. And **82 of the 1,170 e-mails are your own
+inboxes** (`ventas.cundinamarca@avimex.co` on 44 rows, `ventas.cali@avimex.co` on
+28). Mail-merge that column as it stands and 82 of the messages come back to you.
+
+### The CSV was quietly broken, and your data is what breaks it
+
+The old export wrote `"name"` and nothing else. That is wrong on your rows in three
+separate ways, all of them present in the export you sent:
+
+- **A quote inside a value ends the value early.** `Wheelchairs "Emiro"` (cl_id
+  4268) shifts every later column *on that row* — one row out of 2,423, so nobody
+  spots it. Fixed the CSV way: double the quotes, wrap the field.
+- **A comma inside a value splits it.** 19 fields have one, mostly names like
+  `Consultores Galenos UNO, C.A.`.
+- **A value starting with `=` `+` `-` or `@` is read by Excel and Sheets as a
+  formula.** **241 of your phone numbers start with `+57`**, so a straight export
+  hands your sales team a column of `#NAME?` errors instead of numbers to dial.
+
+The file also starts with a BOM, or Excel on Windows opens UTF-8 as Latin-1 and
+every *Bogotá* becomes *BogotÃ¡*. Four assertions, and the quote one counts fields
+the way a CSV reader does rather than eyeballing the text — an unescaped quote
+then shows up as the wrong number of columns instead of as text that merely looks
+odd.
+
+### Two exports, not one with a flag
+
+You have chosen the public map page. That makes this the load-bearing decision in
+the whole feature, so it is enforced in code:
+
+```
+node server/export-map-data.js --audience internal   # name, coords, phone, e-mail, address
+node server/export-map-data.js --audience public     # name, coords, city, category. Nothing else.
+```
+
+They are two separate functions rather than one function with an `if` inside it.
+A shared projection grows a new field one day and the new field goes to **both**
+audiences, because adding it to the shared shape is the path of least resistance
+and nobody re-reads the `if`. Here a field reaches the public feed only if
+somebody types it into the public list — a small, obvious, reviewable diff. An
+unknown `--audience` stops the run rather than falling back to a default, because
+`--audience publik` quietly meaning "internal" is how contact details end up on a
+public website through a typo.
+
+The test scans the **serialised public payload for the actual values** — the phone
+number, the e-mail, the street — not for the field names. A key check answers "is
+there a field called phone", which is not the question; the question is whether the
+number is in the file at all, under any name, nested anywhere. And it runs the
+same scan against the internal payload as a control positive, because otherwise all
+four assertions would pass on an empty object.
+
+Why this is the part that matters: **814 of your 1,170 stores trade under an
+individual's tax identity.** Whatever you decide about which pins go on the public
+map, what protects those people is what each pin *carries*. A trade name and a
+coordinate is a shop. A trade name, a coordinate, a mobile number and a personal
+e-mail is a person's contact card.

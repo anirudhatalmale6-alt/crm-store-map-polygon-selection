@@ -31,6 +31,12 @@ const VENTAS = {
   clientStatus:  'c_status',   // 0 / 1
   clientNit:     'c_nit',
   siteId:        'site_id',
+  /* The three the polygon has to hand back. Measured on your export, not assumed:
+     c_phone is filled on all 2,423 pinned rows, c_mail on 1,170 (every one of them a
+     `store`; not one `potential` row has an e-mail), c_contact on 934. */
+  clientPhone:   'c_phone',
+  clientMail:    'c_mail',
+  clientContact: 'c_contact',
 
   addresses:     'client_address',
   addrId:        'ca_id',

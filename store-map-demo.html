@@ -58,7 +58,19 @@
   .store:hover{background:var(--panel-2)}
   .store .dot{margin-top:5px}
   .store b{display:block;font-weight:600;font-size:13px}
-  .store small{color:var(--muted);font-size:11.5px}
+  /* display:block, and not by preference. These were inline, which was invisible
+     while each store showed one line and became wrong the moment it showed four:
+     an e-mail and a street address ran together as
+     "...@gmail.comCR 70 C 55 33" - one unbroken string that reads as a single
+     corrupt field rather than as two correct ones. */
+  .store small{display:block;color:var(--muted);font-size:11.5px;line-height:1.45;
+               overflow-wrap:anywhere}
+  .store small.k{color:#8b97a6}
+  /* The label that says which field this is. Written as words rather than as a
+     phone/envelope symbol: those two characters are not in every font on every
+     machine, and the fallback is an empty rectangle - a box where the sales team
+     expects to see what the number is for. */
+  .store small i{font-style:normal;color:#6b7785;margin-right:5px}
   .empty{color:var(--muted);font-size:12.5px;border:1px dashed var(--line);
          border-radius:8px;padding:16px;text-align:center}
   .pill{display:inline-flex;align-items:center;gap:6px;background:var(--panel-2);
@@ -100,12 +112,17 @@
       <h2>Store categories</h2>
       <div class="field"><span>Colour pins by</span><select id="catMode">
         <option value="status">Status &mdash; the columns you have today</option>
-        <option value="stype">Store type &mdash; needs a new column</option>
+        <option value="stype">Store type &mdash; every type separately</option>
+        <option value="grouped">Store type &mdash; subcategories folded in</option>
       </select></div>
       <div class="legend" id="legend"></div>
       <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;margin-top:10px">
         <input type="checkbox" id="iconBox"> Icon pins instead of dots
       </label>
+      <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;margin-top:6px">
+        <input type="checkbox" id="artBox"> Use my own pin artwork
+      </label>
+      <p class="hint" id="artNote"></p>
       <p class="hint">Each category carries its own pin shape, the way the layers on your
          My Maps do. Clusters keep the ring, because a bubble of 40 stores has no single
          icon to show.</p>
@@ -334,6 +351,10 @@ const GLYPH = {
   cart:  { d:'M7.2 8.1h1.7l1.5 5.6h5.2l1.2-4H9.4 M11 16.2a.75.75 0 1 1-.01 0 M15.4 16.2a.75.75 0 1 1-.01 0' },
   truck: { d:'M6.6 8.4h6.6v6.1H6.6z M13.2 10.6h2.6l1.6 2v1.9h-4.2 M9.3 16a1.1 1.1 0 1 1-.01 0 M15.4 16a1.1 1.1 0 1 1-.01 0' },
   bldg:  { d:'M8.2 16.4V7.9h7.6v8.5 M10.3 10.3h1.2 M13.4 10.3h1.2 M10.3 13h1.2 M13.4 13h1.2' },
+  /* Subcategory shapes. A dummy/soother and a paw - they have to read as different
+     from the five above at 30px, not just be different paths. */
+  baby:  { d:'M12 8.4a2.2 2.2 0 1 1-.01 0 M12 10.6v5.4 M9.6 16h4.8' },
+  paw:   { d:'M12 12.4a2.4 2.4 0 0 1 2.4 2.4c0 1.1-1.1 1.6-2.4 1.6s-2.4-.5-2.4-1.6a2.4 2.4 0 0 1 2.4-2.4z M9.2 10.4a1 1 0 1 1-.01 0 M14.8 10.4a1 1 0 1 1-.01 0 M11 8.4a.95.95 0 1 1-.01 0 M13 8.4a.95.95 0 1 1-.01 0' },
 };
 const REAL_CATEGORIES = [
   { id:'active',    label:'Active store',   color:'#3ddc97', glyph:GLYPH.bag },
@@ -361,7 +382,39 @@ const STORE_TYPES = [
   { id:'distributor', label:'Distributor',  color:'#3ddc97', glyph:GLYPH.truck },
   { id:'clinic',      label:'Clinic / IPS', color:'#22d3ee', glyph:GLYPH.bldg },
   { id:'other',       label:'Other',        color:'#f472b6', glyph:GLYPH.star },
+
+  /* ---- Subcategories -----------------------------------------------------------
+     "Can we add subcategories in the future if we start selling to Baby Stores?"
+     Yes, and this is what one looks like: a row with a `parent`. Baby Stores is a
+     kind of Supermarket, so it INHERITS the orange - and carries its own shape.
+
+     That split is the whole design, and it is not arbitrary. A map has room for
+     about seven colours before two of them start being argued over at a distance,
+     and you will pass seven the moment subcategories exist. Shapes do not run out
+     the same way. So: colour answers "which part of the business", shape answers
+     "which exact kind of shop". Twenty subcategories in five colours stays
+     readable; twenty colours does not.
+
+     A subcategory with no `parent` in the table falls back to its own colour, so a
+     half-filled hierarchy still draws. */
+  { id:'babystore', label:'Baby store', parent:'supermarket', glyph:GLYPH.baby },
+  { id:'petshop',   label:'Pet shop',   parent:'supermarket', glyph:GLYPH.paw },
 ];
+
+/* A parent's colour, or its own, or the fallback grey. Written as a function and not
+   resolved once into the table because the table is the thing you will be editing:
+   a row added with a parent that is not there yet must still draw a pin, in grey,
+   rather than throw while the map is building itself. */
+function colorOf(t) {
+  if (!t) return '#8b97a6';
+  if (t.color) return t.color;
+  const p = t.parent && STORE_TYPES.find(x => x.id === t.parent);
+  return (p && p.color) || '#8b97a6';
+}
+const parentOf = t => (t && t.parent) || (t && t.id) || null;
+/* True for a type that is somebody's subcategory. Used to indent the legend and to
+   decide what the "grouped" colouring collapses. */
+const isSub = t => Boolean(t && t.parent);
 /* Every lookup goes through `typeOf`, and it never returns undefined. A store whose
    column is empty, or holds a value nobody has added to the table yet, still gets a
    pin: grey, counted in the legend, selectable by a polygon. That matters more than
@@ -369,9 +422,30 @@ const STORE_TYPES = [
    quietly skipped - is how a shop disappears off a map for a year with no error
    anywhere, and the total at the top still looks plausible. */
 const UNCLASSIFIED = { id:'unclassified', label:'Unclassified', color:'#8b97a6', glyph:null };
-const typeById = Object.fromEntries(STORE_TYPES.map(t => [t.id, t]));
+
+/* Inheritance is resolved ONCE, here, so that every object handed to the legend, the
+   cluster ring and the CSV already carries a real colour. The alternative - each of
+   those calling colorOf() for itself - is four places that have to remember to, and
+   the cluster ring is shared with the Node test where colorOf does not even exist. */
+const RESOLVED_TYPES = STORE_TYPES.map(t => ({ ...t, color: colorOf(t) }));
+const typeById = Object.fromEntries(RESOLVED_TYPES.map(t => [t.id, t]));
 const typeOf = v => typeById[v] || UNCLASSIFIED;
-const TYPE_CATEGORIES = STORE_TYPES.concat([UNCLASSIFIED]);
+const TYPE_CATEGORIES = RESOLVED_TYPES.concat([UNCLASSIFIED]);
+
+/* The same list with subcategories folded into their parent: Baby store and Pet shop
+   stop being their own bucket and count as Supermarket. This is the view you want the
+   day there are twenty subcategories and the question is still "how many supermarkets
+   do we cover in Antioquia". Nothing is lost - it is a different grouping of the same
+   column, and one dropdown switches back. */
+const GROUPED_CATEGORIES = RESOLVED_TYPES.filter(t => !isSub(t)).concat([UNCLASSIFIED]);
+/* A store's bucket when subcategories are folded up. Goes through typeOf first, so a
+   store whose column holds something nobody has added to the table still lands in
+   Unclassified rather than in a bucket named after a value it happens to contain. */
+const groupOf = v => {
+  const t = typeOf(v);
+  if (t === UNCLASSIFIED) return UNCLASSIFIED.id;
+  return typeById[t.parent] ? t.parent : t.id;
+};
 
 const STATUS_CATEGORIES = REAL ? REAL_CATEGORIES : DEMO_CATEGORIES;
 /* Reassigned by setCatMode(). Everything downstream reads a store's `cat` and looks
@@ -398,7 +472,14 @@ let nextId = 1;
    colouring back and forth cannot lose either one. */
 const mk = (name, cat, lat, lng, src = 'geocoded', prec = 'ROOFTOP', stype = null) => ({
   id: nextId++, name, cat, statusCat: cat, stype, lat, lng, src, prec,
+  /* Invented contact details, on invented Madrid shops. Never generated for the real
+     set: a plausible-looking phone number that nobody can answer is worse than a
+     blank, because a blank is the one thing a salesperson will not dial. */
+  phone: '+34 6' + String(10 + (nextId * 7) % 90) + ' ' + String(100 + (nextId * 31) % 900) + ' ' + String(100 + (nextId * 17) % 900),
+  mail: nextId % 3 === 0 ? '' : 'tienda' + nextId + '@ejemplo.es',
+  contact: nextId % 4 === 0 ? '' : ['Ana', 'Luis', 'Marta', 'Diego', 'Rocío'][nextId % 5] + ' G.',
   addr: name + ', Madrid',
+  city: 'Madrid',
   // A store that has never been positioned has no address on record. "No record"
   // must not mean "changed", or every store would look stale the day this ships.
   locAddr: src ? name + ', Madrid' : null,
@@ -447,22 +528,66 @@ const mixLabel = mix => mix.map(m => `${m.count} ${catById[m.id].label}`).join('
    colour on the outline AND on the glyph - so the category is still readable and the
    pin is still obviously unfinished, exactly as the dot style does it. */
 const PIN_PATH = 'M12 1.4c-4.42 0-8 3.58-8 8 0 5.9 8 13.6 8 13.6s8-7.7 8-13.6c0-4.42-3.58-8-8-8z';
+/* ---- Your own pin artwork ---------------------------------------------------------
+   "Can I share the pins to use for the categories, or are we obliged to use
+   predefined ones?" - your own, and this is the hook for them: a type row carries an
+   optional `icon`, and when it is there it is drawn instead of the built-in shape.
+
+   One constraint that is not a preference and cannot be worked around, so it is
+   better said now than discovered late: the Google marker is a picture built by this
+   page, and a picture cannot reach out to the network for a SECOND picture. So an
+   icon of yours has to be INLINE - the file's own bytes carried in the row, not a
+   link to a file on a server. That conversion is a one-off when you hand me the
+   artwork, and after that it behaves like any other column.
+
+   What to send, so the artwork survives being a map pin: square, transparent
+   background, and legible at 30 pixels - which is about the size of a fingernail.
+   A logo with readable text on it will not be readable here, at any zoom.
+
+   `ICON_STATE` is why a broken one cannot cost you a store. */
+const ICON_STATE = new Map();
+
+/* An icon that does not load must fall back to the built-in shape, never to nothing.
+   Setting an image on a marker and the image ARRIVING are two different claims - the
+   attribute is there either way - so each icon is loaded once, on purpose, and only
+   an icon that decoded is allowed to be drawn. A typo in one row then costs that row
+   its picture, not its pin. */
+function checkIcons(types, done) {
+  const list = types.filter(t => t.icon);
+  if (!list.length) { done && done(); return; }
+  let left = list.length;
+  const tick = () => { if (--left === 0 && done) done(); };
+  list.forEach(t => {
+    const im = new Image();
+    im.onload = () => { ICON_STATE.set(t.id, im.naturalWidth > 0 ? 'ok' : 'bad'); tick(); };
+    im.onerror = () => { ICON_STATE.set(t.id, 'bad'); tick(); };
+    im.src = t.icon;
+  });
+}
+const iconFor = cat => (cat && cat.icon && ICON_STATE.get(cat.id) === 'ok') ? cat.icon : null;
+
 function pinSvg(cat, o = {}) {
-  const body = o.hollow ? '#141a21' : cat.color;
-  const ink = o.hollow ? cat.color : '#0f1216';
+  const body = o.hollow ? '#141a21' : colorOf(cat);
+  const ink = o.hollow ? colorOf(cat) : '#0f1216';
   const g = cat.glyph;
+  const img = iconFor(cat);
   /* A hollow pin takes the colour out of the FILL, so it has to go on the OUTLINE or
      the pin is dark on a dark map. That was not theoretical: with the store-type
      column empty, every real store is Unclassified, Unclassified has no glyph by
      design, and an imprecise one came out as a dark shape on a dark background with a
      dark outline - invisible, while the counter cheerfully said 2,423 on map. */
-  const edge = o.stroke || (o.hollow ? cat.color : '#0f1216');
+  const edge = o.stroke || (o.hollow ? colorOf(cat) : '#0f1216');
   const w = o.weight == null ? (o.hollow ? 2 : 1.4) : o.weight;
-  return `<path d="${PIN_PATH}" fill="${body}" stroke="${edge}"
-            stroke-width="${w}"/>` +
-    (g ? `<path d="${g.d}" fill="${g.filled ? ink : 'none'}"
+  /* Your artwork sits in the round part of the teardrop, not across the whole box,
+     or half of it would be down in the point where it gets clipped by the shadow. */
+  const art = img
+    ? `<image href="${img}" x="6.2" y="3.6" width="11.6" height="11.6"
+         preserveAspectRatio="xMidYMid meet"/>`
+    : (g ? `<path d="${g.d}" fill="${g.filled ? ink : 'none'}"
             stroke="${g.filled ? 'none' : ink}" stroke-width="1.9"
             stroke-linecap="round" stroke-linejoin="round"/>` : '');
+  return `<path d="${PIN_PATH}" fill="${body}" stroke="${edge}"
+            stroke-width="${w}"/>` + art;
 }
 /* Red, and used nowhere else: a pin in the wrong country is not a shade of
    "imprecise", it is the one kind of error that is simply wrong. */
@@ -575,6 +700,12 @@ if (REAL) {
     stype: s.stype || null,
     lat: s.lat, lng: s.lng,
     src: s.src || 'geocoded', prec: s.prec,
+    /* The three columns the polygon has to hand back. They travel with the store from
+       the export, not fetched per row when you click one: a polygon over Bogota picks
+       2,000 stores, and 2,000 round trips to answer "who do I call" is a spinner.
+       Missing stays missing - '' and not a dash, so the CSV column is genuinely empty
+       and a filter for "no email" finds them. */
+    phone: s.phone || '', mail: s.mail || '', contact: s.contact || '',
     addr: s.addr,
     // The pin WAS placed for this address, so it starts in agreement with itself.
     // Anything else and every real store would show up stale on the first render.
@@ -609,7 +740,7 @@ let reviewOnly = false;  // show only the pins Google was unsure about
 let pinStyle = 'dot';    // 'dot' | 'icon'
 /* What the colours and shapes MEAN. 'status' is what this map shipped with and stays
    the default; 'stype' is what a dedicated store-type column would give you. */
-let catMode = 'status';  // 'status' | 'stype'
+let catMode = 'status';  // 'status' | 'stype' | 'grouped'
 let clustering = true;  // merge nearby pins into a numbered bubble
 const CELL_PX = 48;     // cluster grid size in screen pixels
 
@@ -622,11 +753,16 @@ const $ = id => document.getElementById(id);
    page contradicts itself: the palette, every store's derived `cat`, and the tick
    boxes - a category hidden in one mode has no meaning in the other, so the filter
    is reset rather than carried across under a name that no longer exists. */
+const CAT_MODES = {
+  status:  { list: () => STATUS_CATEGORIES, of: s => s.statusCat },
+  stype:   { list: () => TYPE_CATEGORIES,   of: s => typeOf(s.stype).id },
+  grouped: { list: () => GROUPED_CATEGORIES, of: s => groupOf(s.stype) },
+};
 function setCatMode(mode) {
-  catMode = mode === 'stype' ? 'stype' : 'status';
-  CATEGORIES = catMode === 'stype' ? TYPE_CATEGORIES : STATUS_CATEGORIES;
+  catMode = CAT_MODES[mode] ? mode : 'status';
+  CATEGORIES = CAT_MODES[catMode].list();
   catById = Object.fromEntries(CATEGORIES.map(c => [c.id, c]));
-  stores.forEach(s => { s.cat = catMode === 'stype' ? typeOf(s.stype).id : s.statusCat; });
+  stores.forEach(s => { s.cat = CAT_MODES[catMode].of(s); });
   hidden = new Set();
   fillCatSelect();
 }
@@ -705,6 +841,22 @@ function renderLegend() {
    LIST_CAP and says so; Export CSV always writes the full selection. */
 const LIST_CAP = 200;
 
+/* Phone, contact person, e-mail, street - what the polygon hands back for each store.
+   A field that is empty in the CRM is shown as "no e-mail on record" rather than
+   left off, because those two look identical in a list and mean opposite things: one
+   is a gap in the data, the other is a gap in this page. Worth showing, because on
+   your numbers 1,253 of the 2,423 pinned rows have no e-mail at all - every one of
+   them a prospect rather than a customer. */
+function contactLines(s) {
+  const miss = t => `<small class="k">${t}</small>`;
+  return [
+    s.phone ? `<small><i>Tel</i>${esc(s.phone)}${s.contact ? ' &middot; ' + esc(s.contact) : ''}</small>`
+            : miss('no phone on record'),
+    s.mail ? `<small><i>Email</i>${esc(s.mail)}</small>` : miss('no e-mail on record'),
+    s.addr ? `<small><i>Addr</i>${esc(s.addr)}</small>` : '',
+  ].join('');
+}
+
 function renderSelection() {
   const all = stores.filter(s => selectedIds.has(s.id));
   const sel = all.slice(0, LIST_CAP);
@@ -718,8 +870,9 @@ function renderSelection() {
         <div class="store">
           <span class="dot" style="background:${catById[s.cat].color}"></span>
           <span style="flex:1;min-width:0">
-            <b>${s.name}</b>${s.src === 'manual' ? '<span class="badge">adjusted</span>' : ''}${isVague(s) ? '<span class="badge warn">check</span>' : ''}${isStale(s) ? '<span class="badge stale">address changed</span>' : ''}${isWrongPlace(s) ? '<span class="badge wrong">wrong country</span>' : ''}
+            <b>${esc(s.name)}</b>${s.src === 'manual' ? '<span class="badge">adjusted</span>' : ''}${isVague(s) ? '<span class="badge warn">check</span>' : ''}${isStale(s) ? '<span class="badge stale">address changed</span>' : ''}${isWrongPlace(s) ? '<span class="badge wrong">wrong country</span>' : ''}
             <small>${catById[s.cat].label} &middot; ${s.lat.toFixed(4)}, ${s.lng.toFixed(4)}</small>
+            ${contactLines(s)}
             ${isStale(s) ? `<small style="color:${STALE_COLOR}">pin is at &ldquo;${s.locAddr}&rdquo;</small>` : ''}
             ${isWrongPlace(s) ? `<small style="color:${WRONG_COLOR}">${s.wrong}</small>` : ''}
           </span>
@@ -741,8 +894,14 @@ function renderSelection() {
     : '';
 }
 
-const esc = t => String(t).replace(/[&<>"]/g,
-  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+/* Text from the database goes on the page as TEXT, never as markup. Null and
+   undefined become '' rather than the words "null"/"undefined", which is what
+   String() would print into the cell of a store with no contact person.
+   The apostrophe is in the set because these values are also interpolated into
+   quoted HTML attributes, and one of your rows is literally named
+   Wheelchairs "Emiro" - the quotes are in the data, not in my markup. */
+const esc = t => String(t == null ? '' : t).replace(/[&<>"']/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 /* Rebuilt only when the store list or a name actually changes, so it does not throw
    away whatever the user has picked on every redraw - and capped, because a 2,000
@@ -769,7 +928,7 @@ function log(msg) {
 function addStore(s) {
   // `cat` is derived from whichever field the map is colouring by, so a store added
   // while the map shows store types is drawn as its type and not as its status.
-  s.cat = catMode === 'stype' ? typeOf(s.stype).id : s.statusCat;
+  s.cat = CAT_MODES[catMode].of(s);
   stores.push(s);
   log(`+ added "${s.name}" (${s.lat.toFixed(4)}, ${s.lng.toFixed(4)})`);
   recompute();
@@ -1353,7 +1512,14 @@ const GoogleSurface = (() => {
          then both together, which fails. Keeping both is a string per marker, and the
          day someone adds a store type whose id collides with a status id, mix stops
          being enough on its own. */
-      const sig = [pinStyle, catMode, pos.lat, pos.lng, colour, scale, selIn, g.count, canDrag,
+      /* The artwork toggle needs its own token, and it is NOT covered by anything else
+         here. Turning custom icons on while icon pins are already showing changes
+         neither pinStyle, nor catMode, nor the colour, nor the count - only the
+         picture inside the pin. Left out, the tick box would be a control that does
+         nothing on exactly the surface it was built for. `iconFor` and not `cat.icon`,
+         so a marker also repaints when an icon finishes loading or fails to. */
+      const art = single ? (iconFor(catById[s.cat]) || '') : '';
+      const sig = [pinStyle, catMode, art, pos.lat, pos.lng, colour, scale, selIn, g.count, canDrag,
                    vague, stale, mix.map(x => x.id + ':' + x.count).join(','), title].join('|');
 
       let m = markers.get(key);
@@ -1420,13 +1586,55 @@ $('iconBox').onchange = e => {
 };
 $('catMode').onchange = e => {
   setCatMode(e.target.value);
-  $('catModeNote').textContent = catMode !== 'stype' ? ''
+  $('catModeNote').textContent = catMode === 'status' ? ''
     : REAL
       ? `Every one of your ${stores.length} stores is Unclassified: there is no store-type `
         + `column in the CRM yet. Add it, fill it once, and these pins sort themselves.`
-      : 'Invented types on invented stores — the real export has no type column yet.';
+      : catMode === 'grouped'
+        ? 'Baby store and Pet shop are counted as Supermarket here — same column, folded up.'
+        : 'Invented types on invented stores — the real export has no type column yet.';
   renderLegend();
   recompute();
+};
+
+/* ---- Stand-in artwork, so the hook can be seen working -----------------------------
+   These three are mine and they are placeholders; the point is the mechanism, not the
+   drawings. Send me yours and they replace this list.
+
+   Pet shop is deliberately given a BROKEN image, and it is worth watching what happens
+   to it: it keeps its pin and falls back to the built-in paw. That is the behaviour
+   that matters when a real file is one day renamed or sent in a format the browser
+   will not decode - the store stays on the map. */
+const artSvg = inner => 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">' + inner + '</svg>');
+const SAMPLE_ART = {
+  drugstore: artSvg('<circle cx="12" cy="12" r="10" fill="#fff"/>'
+    + '<path d="M12 5.5v13 M5.5 12h13" stroke="#1f6feb" stroke-width="4.4" stroke-linecap="round"/>'),
+  supermarket: artSvg('<rect x="1.5" y="1.5" width="21" height="21" rx="5" fill="#fff"/>'
+    + '<path d="M5 7h3l2.4 9h8.2l1.6-6.5H8.6" fill="none" stroke="#b45309" stroke-width="2.2"'
+    + ' stroke-linecap="round" stroke-linejoin="round"/>'),
+  babystore: artSvg('<circle cx="12" cy="12" r="10.5" fill="#fff"/>'
+    + '<circle cx="12" cy="9" r="3.4" fill="none" stroke="#be185d" stroke-width="2.2"/>'
+    + '<path d="M12 12.4v6.4 M8.6 18.8h6.8" stroke="#be185d" stroke-width="2.2" stroke-linecap="round"/>'),
+  petshop: 'data:image/svg+xml;base64,this-is-not-an-image',
+};
+
+$('artBox').onchange = e => {
+  const on = e.target.checked;
+  RESOLVED_TYPES.forEach(t => { t.icon = on ? SAMPLE_ART[t.id] : undefined; });
+  ICON_STATE.clear();
+  /* Redraw only AFTER the images have been asked to load and have answered. Painting
+     first and re-painting on each onload would flash the built-in shape and then swap
+     it, and on the Google surface every swap is a marker rebuild. */
+  checkIcons(RESOLVED_TYPES, () => {
+    const bad = RESOLVED_TYPES.filter(t => t.icon && ICON_STATE.get(t.id) !== 'ok');
+    $('artNote').textContent = !on ? '' :
+      `Custom artwork on ${RESOLVED_TYPES.filter(t => ICON_STATE.get(t.id) === 'ok').length} types.`
+      + (bad.length ? ` ${bad.map(t => t.label).join(', ')} did not load — drawn with the built-in shape instead of being dropped.` : '');
+    if (pinStyle !== 'icon') { pinStyle = 'icon'; $('iconBox').checked = true; }
+    renderLegend();
+    recompute();
+  });
 };
 $('undoBtn').onclick = undoMove;
 $('reviewBox').onchange = e => { reviewOnly = e.target.checked; recompute(); };
@@ -1438,7 +1646,7 @@ $('bulkBtn').onclick = () => {
   if (stores.length > 500) return;
   const extra = makeBulkStores(2000 - stores.length);
   // The new arrivals have to be coloured the way the map is coloured right now.
-  extra.forEach(s => { s.cat = catMode === 'stype' ? typeOf(s.stype).id : s.statusCat; });
+  extra.forEach(s => { s.cat = CAT_MODES[catMode].of(s); });
   stores = stores.concat(extra);
   log(`+ loaded ${extra.length} stores (${stores.length} total)`);
   recompute();
@@ -1466,21 +1674,57 @@ $('addStore').onclick = () => {
      give a new record. Writing a type id into `statusCat` would put a category on
      the store that no status filter can ever match. */
   const pick = $('nCat').value;
-  addStore(catMode === 'stype'
-    ? mk(name, STATUS_CATEGORIES[0].id, lat, lng, 'geocoded', 'ROOFTOP', pick)
-    : mk(name, pick, lat, lng));
+  addStore(catMode === 'status'
+    ? mk(name, pick, lat, lng)
+    : mk(name, STATUS_CATEGORIES[0].id, lat, lng, 'geocoded', 'ROOFTOP', pick));
   $('nName').value = $('nLat').value = $('nLng').value = '';
 };
+
+/* ---- CSV, written for the file your team will actually open ------------------------
+   The old version wrote `"${name}"` and nothing else, which is wrong on your data in
+   three separate ways. All three are in the export you sent me, so none of them is
+   hypothetical:
+
+     - A quote inside a value ends the value early. `Wheelchairs "Emiro"` (cl_id 4268)
+       shifts every column after it on that row - by one row, not one cell, so nobody
+       spots it. The fix is the CSV rule: double the quotes, wrap the whole field.
+     - A comma inside a value splits it. 19 of your fields have one, mostly names like
+       `Consultores Galenos UNO, C.A.`.
+     - A value starting with = + - or @ is read by Excel and Sheets as a FORMULA. 241
+       of your phone numbers start with `+57`, so a straight export gives your sales
+       team a column of #NAME? errors instead of numbers to dial. Prefixing a
+       zero-width-safe apostrophe is the standard defence; it does not show in the
+       cell, and the number survives.
+
+   The BOM at the front is for the same audience: without it Excel on Windows opens
+   UTF-8 as Latin-1 and every Bogotá becomes BogotÃ¡. */
+const CSV_FORMULA = /^[=+\-@\t\r]/;
+function csvCell(v) {
+  let s = v == null ? '' : String(v);
+  if (CSV_FORMULA.test(s)) s = "'" + s;
+  return '"' + s.replace(/"/g, '""') + '"';
+}
+function csvOf(rows) {
+  const cols = ['id', 'name', 'category', 'phone', 'contact', 'email',
+                'address', 'city', 'latitude', 'longitude', 'pin_precision'];
+  const line = s => [s.id, s.name, catById[s.cat] ? catById[s.cat].label : s.cat,
+                     s.phone, s.contact, s.mail, s.addr, s.city,
+                     s.lat, s.lng, s.prec].map(csvCell).join(',');
+  return '﻿' + cols.join(',') + '\r\n' + rows.map(line).join('\r\n') + '\r\n';
+}
 
 $('csvBtn').onclick = () => {
   const sel = stores.filter(s => selectedIds.has(s.id));
   if (!sel.length) return;
-  const csv = 'id,name,category,latitude,longitude\n' +
-    sel.map(s => `${s.id},"${s.name}",${s.cat},${s.lat},${s.lng}`).join('\n');
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([csv], { type:'text/csv' }));
+  a.href = URL.createObjectURL(new Blob([csvOf(sel)], { type:'text/csv;charset=utf-8' }));
   a.download = 'selected-stores.csv';
   a.click();
+  const noMail = sel.filter(s => !s.mail).length;
+  /* Said out loud, because a column that is blank for half the rows looks like the
+     export failed. It did not: those stores have no e-mail in the CRM. */
+  log(`exported ${sel.length} store${sel.length === 1 ? '' : 's'}`
+      + (noMail ? ` — ${noMail} of them have no e-mail on record` : ''));
 };
 
 $('loadGoogle').onclick = () => {

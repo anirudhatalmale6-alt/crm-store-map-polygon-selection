@@ -345,15 +345,40 @@ with sync_playwright() as p:
                        || m.icon.url.includes('circle'))""") is True)
 
     # ---------- pins driven by a store-type column ----------
-    types = page.evaluate("""() => ({
-      n: STORE_TYPES.length,
-      colours: [...new Set(TYPE_CATEGORIES.map(c => c.color))].length,
-      glyphs: [...new Set(STORE_TYPES.map(c => c.glyph.d))].length,
-      fallbackGlyph: UNCLASSIFIED.glyph,
-      all: TYPE_CATEGORIES.length,
-    })""")
-    ok("every store type has a colour and a shape of its own",
-       types["colours"] == types["all"] and types["glyphs"] == types["n"], types)
+    types = page.evaluate("""() => {
+      const top = RESOLVED_TYPES.filter(t => !t.parent);
+      const sub = RESOLVED_TYPES.filter(t => t.parent);
+      return {
+        n: STORE_TYPES.length,
+        top: top.length,
+        sub: sub.length,
+        topColours: [...new Set(top.map(c => c.color))].length,
+        glyphs: [...new Set(RESOLVED_TYPES.map(c => c.glyph.d))].length,
+        // A subcategory must end up on its parent's colour, not on a colour of its
+        // own and not on the grey fallback.
+        inherited: sub.filter(s => {
+          const p = RESOLVED_TYPES.find(t => t.id === s.parent);
+          return p && s.color === p.color;
+        }).length,
+        orphanGrey: sub.filter(s => s.color === '#8b97a6').length,
+        fallbackGlyph: UNCLASSIFIED.glyph,
+        all: TYPE_CATEGORIES.length,
+        grouped: GROUPED_CATEGORIES.length,
+      };
+    }""")
+    # Colours are per TOP-LEVEL type; shapes are per type including subcategories.
+    # That asymmetry is the design and not an oversight - a map runs out of arguable
+    # colours long before it runs out of shapes - so it is asserted, not assumed.
+    ok("every top-level store type has a colour of its own",
+       types["topColours"] == types["top"], types)
+    ok("...and every type, subcategories included, has a shape of its own",
+       types["glyphs"] == types["n"], types)
+    ok("...while a subcategory inherits its parent's colour rather than inventing one",
+       types["sub"] > 0 and types["inherited"] == types["sub"], types)
+    ok("...and none of them silently fell through to the grey fallback",
+       types["orphanGrey"] == 0, types)
+    ok("folding subcategories in gives exactly the top-level types plus Unclassified",
+       types["grouped"] == types["top"] + 1, types)
     # Grey and blank is the point: Unclassified must not look like a type somebody
     # chose, or an unfilled column reads on the map as a real answer.
     ok("...and the Unclassified fallback deliberately has neither a glyph nor a type colour",
@@ -437,6 +462,32 @@ with sync_playwright() as p:
     ok("...and none of them is dark on dark", ink["invisible"] == 0, ink)
     ok("control positive: the typed stores are drawn as something else entirely",
        blank["typed"] > 0, blank)
+
+    # ---------- the client's own artwork, on the surface that diffs ----------
+    # Icon pins are ALREADY on here, so turning artwork on changes neither pinStyle nor
+    # catMode nor any colour nor any count - only the picture inside the pin. That is
+    # exactly the shape of a control that silently does nothing: the diff below skips
+    # any marker whose signature is unchanged, so the artwork has to be IN that
+    # signature. Measured as SDK setter calls, not as a screenshot.
+    page.evaluate("() => { window.__calls = 0; }")
+    page.check("#artBox")
+    page.wait_for_function("() => ICON_STATE.size > 0")
+    ok("turning on your own artwork actually repaints the markers",
+       page.evaluate("window.__calls") > 0, page.evaluate("window.__calls"))
+    artg = page.evaluate("""() => {
+      const svgs = window.__stub.markers.filter(m => !m._gone)
+        .filter(m => m.icon && typeof m.icon.url === 'string')
+        .map(m => decodeURIComponent(m.icon.url.split(',')[1]));
+      return { withArt: svgs.filter(s => s.includes('<image')).length,
+               total: svgs.length,
+               // The Google marker is itself a picture, and a picture cannot fetch a
+               // second picture over the network. So the artwork has to be inline; a
+               // marker referencing http(s) would silently draw an empty pin.
+               remote: svgs.filter(s => /<image[^>]+href="https?:/.test(s)).length };
+    }""")
+    ok("...and your artwork is inside the marker, not linked from it",
+       artg["withArt"] > 0 and artg["remote"] == 0, artg)
+    page.uncheck("#artBox")
     page.uncheck("#iconBox")
     page.select_option("#catMode", "status")
 
