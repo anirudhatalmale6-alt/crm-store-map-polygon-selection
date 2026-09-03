@@ -231,10 +231,11 @@
 <script src="map-data.js"></script>
 
 <!-- Your pin artwork, converted to something a marker can actually carry.
-     `python3 tools/build-pin-art.py <folder with the Pin-*.png> > pin-art.js` writes
-     it. Also NOT in the repository - it is your branding, not mine to publish - and
-     like the export above, this tag does nothing when the file is absent and the map
-     falls back to the drawn pins. -->
+     `python3 tools/build-pin-art.py artwork > pin-art.js` writes it from the files in
+     artwork/. Both are committed at your go-ahead, so a fresh clone draws your pins
+     with nothing to set up; `--check` re-runs the build and fails if this file has
+     drifted from the artwork. Like the export above, this tag does nothing when the
+     file is absent and the map falls back to the drawn pins. -->
 <script src="pin-art.js"></script>
 
 <script>

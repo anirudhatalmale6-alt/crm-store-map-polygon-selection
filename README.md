@@ -38,6 +38,7 @@ node test-selection.js        # 32 assertions on the selection + clustering engi
 python3 test_ui.py            # 114 assertions driving the real browser + screenshots
 python3 test_gmaps_surface.py # 62 assertions on the GOOGLE surface, with no API key
 node server/test_export.js    # 21 assertions on what each export is allowed to carry
+python3 tools/build-pin-art.py artwork --check   # pin-art.js still matches artwork/
 node server/test_schema.js    # 42 assertions on the table/column config (no database)
 node server/test_geocoder.js  # 26 assertions on the geocoder (stubbed fetch, no cost)
 node server/test_api.js       # 89 assertions: real Express + real MySQL + real HTTP
@@ -1330,9 +1331,18 @@ my-pin hook further up this file, and it is handled differently: `art` *replaces
 built-in pin instead of sitting inside it. Drawing it the other way gives a pin inside
 a pin, so there is an assertion for exactly that.
 
-`python3 tools/build-pin-art.py <folder with the Pin-*.png> > pin-art.js` does the
-conversion. Neither the artwork nor the generated file is in this repository: it is
-your branding, not mine to publish. Re-run it whenever the artwork changes.
+`python3 tools/build-pin-art.py artwork > pin-art.js` does the conversion, from the
+originals in `artwork/`. Both the artwork and the generated file are committed — you
+said to push them — so a fresh clone draws your pins with nothing to set up.
+
+Because the *output* now lives in the repository next to its generator, it can drift
+from it: edit the artwork, forget to re-run, and the stale `pin-art.js` still loads and
+still draws pins. They are just the old ones, and the map looks completely healthy. So
+the build is re-run and compared as part of the test suite:
+
+```sh
+python3 tools/build-pin-art.py artwork --check   # in step with artwork/, or exit 1
+```
 
 Three things that script fixes, each of which would otherwise reach the map:
 
