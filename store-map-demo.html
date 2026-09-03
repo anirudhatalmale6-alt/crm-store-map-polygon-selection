@@ -837,6 +837,27 @@ const isOffTown = s => {
 
 const needsReview = s => isVague(s) || isStale(s) || isWrongPlace(s) || isOffTown(s);
 
+/* The same rule lives in server/regeocode.js, which is what actually moves the pins.
+   Two copies of one rule drift, and the drift would be silent and expensive: the map
+   would ring a pin the re-geocoder declines to rescue, or the re-geocoder would drag a
+   pin the map was perfectly happy with. This hook lets the check run against the
+   SHIPPED page rather than against a third copy written inside a test. */
+window.__townRule = () => ({
+  constants: { TOWN_MIN, TOWN_MIN_KM, TOWN_SPREAD_X, notATown: [...NOT_A_TOWN].sort() },
+  offTown: stores.filter(isOffTown).map(s => s.id).sort(),
+  towns: [...TOWNS].map(([k, t]) => [k, t.n, +t.far.toFixed(6)]).sort(),
+  /* Counted per reason, not as one total. A single "pins to check: N" would fall the
+     moment any one reason improved, and would read as though all of them had. */
+  review: {
+    total: stores.filter(needsReview).length,
+    vague: stores.filter(isVague).length,
+    stale: stores.filter(isStale).length,
+    wrongCountry: stores.filter(isWrongPlace).length,
+    wrongTown: stores.filter(isOffTown).length,
+    stores: stores.length,
+  },
+});
+
 let stores = [
   mk('Gran Vía 34',        'chain',     40.4203, -3.7058),
   mk('Callao',             'chain',     40.4197, -3.7060),

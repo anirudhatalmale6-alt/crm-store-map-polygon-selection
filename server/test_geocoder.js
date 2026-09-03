@@ -92,6 +92,48 @@ const g = (body, status) => makeGeocoder({ apiKey: 'k', fetchImpl: reply(body, s
   ok('...applies when asked', isPinned() === true);
   ok('...and is idempotent', pinToIPv4() === true && isPinned() === true);
 
+  /* The Hot Fill shape: Google's FIRST answer is the wrong town and its SECOND is the
+     right one. Reading results[0] silently discarded the answer we were paying for. */
+  const twoBody = {
+    status: 'OK',
+    results: [
+      { geometry: { location: { lat: 6.2387, lng: -75.5648 }, location_type: 'ROOFTOP' },
+        formatted_address: 'Las Palmas, Medellin', partial_match: true, types: ['route'] },
+      { geometry: { location: { lat: 6.1508, lng: -75.3800 }, location_type: 'GEOMETRIC_CENTER' },
+        formatted_address: 'Rionegro, Antioquia', types: ['locality'] },
+    ],
+  };
+
+  const list = await g(twoBody)('KM 1 VIA AEROPUERTO LAS PALMAS, Rionegro', { all: true });
+  ok('every candidate is returned, not just the first', list.length === 2, JSON.stringify(list));
+  ok('...in Google\'s own order', list[0].lat === 6.2387 && list[1].lat === 6.1508);
+  ok('...each carrying its own precision',
+     list[0].precision === 'ROOFTOP' && list[1].precision === 'GEOMETRIC_CENTER');
+  // Not a grade of the answer but a statement about the question, so it must survive.
+  ok('partial_match survives as its own field, apart from precision',
+     list[0].partial === true && list[1].partial === false, JSON.stringify(list.map(c => c.partial)));
+  ok('types survive, so a "locality" answer can be told from a street one',
+     list[1].types.includes('locality'));
+
+  // Control positive: the default call is unchanged by any of the above.
+  const one = await g(twoBody)('KM 1 VIA AEROPUERTO LAS PALMAS, Rionegro');
+  ok('control positive: the plain call still returns exactly the first candidate',
+     one.lat === 6.2387 && one.precision === 'ROOFTOP', JSON.stringify(one));
+
+  ok('ZERO_RESULTS with {all} is an empty list, not null',
+     Array.isArray(await g({ status: 'ZERO_RESULTS', results: [] })('x', { all: true })));
+  ok('an empty address with {all} costs no request and yields an empty list',
+     (await g(twoBody)('  ', { all: true })).length === 0);
+
+  /* A result with no usable geometry is skipped rather than ending the list, so one
+     malformed entry cannot hide the good answers behind it. */
+  const junkFirst = await g({ status: 'OK', results: [
+    { formatted_address: 'no geometry at all' },
+    { geometry: { location: { lat: 1, lng: 2 }, location_type: 'ROOFTOP' }, formatted_address: 'real' },
+  ] })('x', { all: true });
+  ok('a malformed candidate is dropped, not treated as the end of the list',
+     junkFirst.length === 1 && junkFirst[0].formattedAddress === 'real', JSON.stringify(junkFirst));
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

@@ -1407,3 +1407,111 @@ zoom they are told apart by colour alone. And **the biggest group on your map is
 grey one**: 1,253 Potential against 1,132 Active. That reads as deliberate (your
 customers pop, your prospects recede) but it is worth saying out loud rather than
 discovering it on screen.
+
+## "My Maps was more accurate than your geocoding" — he was right
+
+He compared this map against one he had built himself in Google My Maps and found My
+Maps closer to reality. Reproduced against the live API, on his own two examples, he
+was right both times. Two different faults, not one.
+
+**Hot Fill S.A.S** — `KM 1 VIA AEROPUERTO LAS PALMAS CEN EMPRESARIAL LA REGIONAL BG 8
+Y 9, Rionegro, Antioquia`. That is not an address, it is the description of a landmark.
+The Geocoding API matched the words **LAS PALMAS** to a neighbourhood of **Medellín**
+and ignored Rionegro entirely — 23 km out. Its **second** result was Rionegro, and the
+geocoder read `results[0]` and threw the rest away. The right answer had already been
+fetched and paid for.
+
+**Maria Victoria Mona Posada** — right city, wrong part of it, 3.65 km out. Nothing was
+"ignored" here; the address is simply thin.
+
+### Why My Maps wins, and it is not better data
+
+They are **different services**. My Maps searches the **places** index, which knows
+businesses by name. The Geocoding API **parses addresses** — and on a row where the
+address is a landmark description, it has nothing to grip. That is the whole mechanism.
+The Places API would be the like-for-like tool, and it is not enabled on the project.
+
+Sending the store **name together with the address** approximates what My Maps sends.
+Measured against his own My Maps points, before writing anything:
+
+| query sent | Hot Fill | Mona Posada |
+|---|---:|---:|
+| address alone — what the first run did | 23.1 km | 3.65 km |
+| store **name** alone | **0.0 km** | **7.83 km** |
+| store name **+** address | 0.3 km | **0.93 km** |
+
+The middle row is why this took a second day. Name-alone nails his first example and is
+**twice as far out** on his second — it fails whenever the "store name" is a person's
+name, which on this data is often. A fix measured on one example is a hypothesis.
+
+### What `server/regeocode.js` actually does
+
+Ask **both** questions, keep **every** answer to each, and choose between them using a
+fact Google does not have: **where this customer's other stores in that town are**.
+
+The rule that matters most: **a pin outside its own town is pulled back inside even
+when Google grades the new answer lower.** `location_type` says how hard Google looked,
+not whether it was right, and ROOFTOP on a real building in the wrong town is the
+dangerous case precisely because it looks like the best pin on the map. Ranking by
+Google's confidence is what put Hot Fill in Medellín to begin with.
+
+### The run: 733 rows, 1,466 requests, about US$7 of Google credit
+
+| | before | after |
+|---|---:|---:|
+| ROOFTOP | 1,701 | **2,001** |
+| APPROXIMATE | 380 | **161** |
+| pins outside their own town | 57 | **16** |
+| pins outside Colombia | 3 | **2** |
+| **pins carrying any warning** | **584** | **330** |
+
+358 pins moved. Median correction 0.98 km; the largest was **2,274 km** — a Pasto store
+pinned in **Puerto Rico**, now on its own street at ROOFTOP.
+
+### 37 corrections that were rejected on purpose
+
+The first pass accepted 395. Checking the five largest by hand, **two were wrong**, and
+both had a CRM city of `No identificada`:
+
+```
+ca_id 3655  "Clle 14, Colombia"        -> flung 742 km to Santa Marta
+ca_id 3049  "Cra 53 #49-17, Colombia"  -> ROOFTOP-sure in a village in Antioquia
+```
+
+With no town to check against, the only thing left is Google grading its own work —
+the exact signal this whole exercise exists because it failed. So when there is no town
+reference, a second opinion is taken **only if both differently-phrased questions
+arrived at the same place**. Two questions agreeing is evidence; one question sounding
+certain is not.
+
+That costs 37 corrections, and those pins keep their warning. "We still do not know
+where this is" is the honest outcome — better than a confident pin with nothing behind
+it. Several of those addresses are `1503, Cundinamarca` or `Putumayo, Colombia`, which
+are placeholders, not addresses.
+
+### 44%, not "the majority"
+
+584 warnings down to 330. That is 44% cleared. **330 pins still carry a warning** and
+still need looking at.
+
+The 16 that are still out of town are mostly **the CRM disagreeing with itself**, which
+no geocoder can fix: `Mondomo` addressed under `Santander de Quilichao` (15 km away, and
+the address is correct), `Acacías` filed under `Villavicencio`, `saravena` under
+`Arauca`. Those are data questions, not geocoding ones.
+
+### One rule, two languages — `tools/check-town-rule.py`
+
+"Is this pin outside its own town?" is implemented twice: in the browser, where it draws
+the ring, and in Node, where it decides which pins may be moved. Drift between them
+would be silent and expensive — the map ringing pins the pass will never rescue, or the
+pass hauling pins the map never questioned. Both are run over all 2,423 rows and
+compared row for row, and the browser side is asked through the **shipped page**, not a
+third copy of the rule living in the test.
+
+### Nothing here was run against your database
+
+The pass ran against my local copy of your dump. `regeocode-corrections.sql` is the 358
+changes as plain `UPDATE` statements, each keeping its `location_source <> 'manual'`
+guard, for whoever owns production to read and apply in their own window. Every answer
+Google gave is cached in `regeocode-cache.jsonl`, so re-running after a rule change
+costs nothing — the numbers above were re-derived three times without buying a request.

@@ -11,3 +11,8 @@ real-shots/
 # pin-art.js ARE committed, at your go-ahead, so the map draws your pins from a
 # fresh clone with nothing to set up.
 pins/
+
+# Every answer Google gave for the second pass. Keyed by ca_id and full of resolved
+# street addresses for real customers, a lot of whom are named individuals rather than
+# companies. It is a cache, not a deliverable - regeocode.js rebuilds it.
+regeocode-cache.jsonl
