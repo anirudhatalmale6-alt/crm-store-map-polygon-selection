@@ -760,7 +760,82 @@ const isStale = s => s.locAddr != null && s.addr != null && s.addr !== s.locAddr
    the worst error in the batch at the bottom, so it needs its own reason. */
 const isWrongPlace = s => Boolean(s.wrong);
 /* All three are jobs for a person, so all three belong on the same short list. */
-const needsReview = s => isVague(s) || isStale(s) || isWrongPlace(s);
+/* ---- The pin Google was SURE about and still got wrong -------------------------
+   Every warning above this line comes from Google grading its own answer. That grade
+   misses an entire class of error: a confident ROOFTOP hit on a real building in the
+   WRONG TOWN. On the real data 5 stores are more than 25 km from their own town and
+   carry no warning at all, because Google said it had found the building - the map
+   looked healthy and the pin was 400 km out.
+
+   This checks Google's answer against something Google never saw: where the customer's
+   OTHER stores in the same town actually are. The reference is the MEDIAN, so a couple
+   of wrong pins cannot drag the town to meet them, and a town needs at least four
+   stores before it is allowed to judge anything.
+
+   Towns are grouped by name, and a name that is not a town - "No identificada",
+   "Internacional", a country - is excluded. Left in, they form one meaningless cloud
+   whose centre is somewhere in the sea, and then every store in it looks wrong. */
+const TOWN_MIN = 4;        // stores needed before a town can be a reference
+/* "Far" has to be measured in the town's OWN units. A flat kilometre threshold cannot
+   work for both Bogota, whose stores genuinely spread 6.4 km from the centre, and
+   Rionegro, whose 24 stores all sit within 1.3 km: pick a number big enough not to
+   drown Bogota and it lets a Rionegro store sit 23 km out unremarked - which is
+   exactly the pin the customer found and this first version missed at 25 km flat.
+   So each town gets its own bar: six times its own median spread, never below 8 km,
+   because a handful of stores in one street would otherwise make a 200 m error look
+   scandalous. On the real data: 57 flagged out of 2,423. */
+const TOWN_MIN_KM = 8;
+const TOWN_SPREAD_X = 6;
+const NOT_A_TOWN = new Set(['', 'no identificada', 'internacional', 'sin ciudad',
+  'chile', 'ecuador', 'peru', 'italia', 'costa rica', 'venezuela', 'panama', 'mexico']);
+
+const townKey = s => String(s.city || '')
+  .normalize('NFKD').replace(/[̀-ͯ]/g, '')
+  .toLowerCase().replace(/\b\d{2}-\d{3}\b/g, '').replace(/\bd\.?c\.?\b/g, '')
+  .replace(/[^a-z ]/g, ' ').trim().replace(/\s+/g, ' ');
+
+function kmApart(a, b) {
+  const R = 6371, r = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * r, dLng = (b.lng - a.lng) * r;
+  const h = Math.sin(dLat / 2) ** 2
+          + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+const median = xs => {
+  const a = xs.slice().sort((p, q) => p - q), m = a.length >> 1;
+  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+};
+
+let TOWNS = new Map();
+/* Recomputed whenever the store set changes rather than cached per store: moving one
+   pin by hand moves the town it belongs to, and a stale reference would go on judging
+   against where the town used to be. */
+function rebuildTowns(list) {
+  const groups = new Map();
+  for (const s of list) {
+    const k = townKey(s);
+    if (!k || NOT_A_TOWN.has(k)) continue;
+    (groups.get(k) || groups.set(k, []).get(k)).push(s);
+  }
+  TOWNS = new Map();
+  for (const [k, rows] of groups) {
+    if (rows.length < TOWN_MIN) continue;
+    const lat = median(rows.map(r => r.lat)), lng = median(rows.map(r => r.lng));
+    const spread = median(rows.map(r => kmApart(r, { lat, lng })));
+    TOWNS.set(k, { lat, lng, n: rows.length, spread,
+                   far: Math.max(TOWN_MIN_KM, TOWN_SPREAD_X * spread) });
+  }
+}
+function townGap(s) {
+  const t = TOWNS.get(townKey(s));
+  return t ? kmApart(s, t) : null;
+}
+const isOffTown = s => {
+  const t = TOWNS.get(townKey(s));
+  return Boolean(t) && kmApart(s, t) > t.far;
+};
+
+const needsReview = s => isVague(s) || isStale(s) || isWrongPlace(s) || isOffTown(s);
 
 let stores = [
   mk('Gran Vía 34',        'chain',     40.4203, -3.7058),
@@ -939,6 +1014,9 @@ function reviewCount() { return stores.filter(needsReview).length; }
 
 function recompute() {
   const t0 = performance.now();
+  /* Before selecting anything: a store may have been added, removed or dragged since
+     the last pass, and every one of those moves the town it belongs to. */
+  rebuildTowns(stores);
   selectedIds = new Set(storesInPolygon(visibleStores(), polygon).map(s => s.id));
   const t1 = performance.now();
   renderSelection();
@@ -1045,6 +1123,7 @@ function storeCard(s) {
   if (isVague(s)) bits.push('approximate position');
   if (isStale(s)) bits.push('address changed since this pin was placed');
   if (isWrongPlace(s)) bits.push('outside Colombia');
+  if (isOffTown(s)) bits.push(`${townGap(s).toFixed(0)} km from your other ${esc(s.city)} stores`);
   if (s.src === 'manual') bits.push('moved by hand');
   return `<div class="card">
     <b>${esc(s.name)}</b>
@@ -1069,11 +1148,12 @@ function renderSelection() {
         <div class="store">
           <span class="dot" style="background:${catById[s.cat].color}"></span>
           <span style="flex:1;min-width:0">
-            <b>${esc(s.name)}</b>${s.src === 'manual' ? '<span class="badge">adjusted</span>' : ''}${isVague(s) ? '<span class="badge warn">check</span>' : ''}${isStale(s) ? '<span class="badge stale">address changed</span>' : ''}${isWrongPlace(s) ? '<span class="badge wrong">wrong country</span>' : ''}
+            <b>${esc(s.name)}</b>${s.src === 'manual' ? '<span class="badge">adjusted</span>' : ''}${isVague(s) ? '<span class="badge warn">check</span>' : ''}${isStale(s) ? '<span class="badge stale">address changed</span>' : ''}${isWrongPlace(s) ? '<span class="badge wrong">wrong country</span>' : ''}${!isWrongPlace(s) && isOffTown(s) ? '<span class="badge wrong">wrong town</span>' : ''}
             <small>${catById[s.cat].label} &middot; ${s.lat.toFixed(4)}, ${s.lng.toFixed(4)}</small>
             ${contactLines(s)}
             ${isStale(s) ? `<small style="color:${STALE_COLOR}">pin is at &ldquo;${s.locAddr}&rdquo;</small>` : ''}
             ${isWrongPlace(s) ? `<small style="color:${WRONG_COLOR}">${s.wrong}</small>` : ''}
+            ${!isWrongPlace(s) && isOffTown(s) ? `<small style="color:${WRONG_COLOR}">${townGap(s).toFixed(0)} km from your other ${esc(s.city)} stores &mdash; Google was confident, and confident is not the same as right</small>` : ''}
           </span>
           <button class="del" data-del="${s.id}" title="Delete from CRM">&times;</button>
         </div>`).join('')
@@ -1335,7 +1415,7 @@ const OfflineSurface = (() => {
             ${stale ? `<circle class="ring" data-sid="${s.id}" cx="${g.x}" cy="${g.y}" r="${5 * k}"
                                fill="none" stroke="${STALE_COLOR}" stroke-width="2"
                                pointer-events="none"/>` : ''}
-            ${isWrongPlace(s) ? `<circle class="ring" data-sid="${s.id}" cx="${g.x}" cy="${g.y}"
+            ${(isWrongPlace(s) || isOffTown(s)) ? `<circle class="ring" data-sid="${s.id}" cx="${g.x}" cy="${g.y}"
                                r="${7 * k}" fill="none" stroke="${WRONG_COLOR}"
                                stroke-width="2.5" pointer-events="none"/>` : ''}
             <g class="pin" data-sid="${s.id}"
@@ -1359,7 +1439,7 @@ const OfflineSurface = (() => {
                              r="${on ? 13 : 10}" fill="none" stroke="${STALE_COLOR}"
                              stroke-width="2" opacity=".95"
                              pointer-events="none"/>` : ''}
-          ${isWrongPlace(s) ? `<circle class="ring" data-sid="${s.id}" cx="${g.x}" cy="${g.y}"
+          ${(isWrongPlace(s) || isOffTown(s)) ? `<circle class="ring" data-sid="${s.id}" cx="${g.x}" cy="${g.y}"
                              r="${on ? 15 : 12}" fill="none" stroke="${WRONG_COLOR}"
                              stroke-width="2.5" opacity=".95"
                              pointer-events="none"/>` : ''}
@@ -1710,7 +1790,8 @@ const GoogleSurface = (() => {
            pin is provably on the old street. It outranks the white "selected" ring:
            being in the current selection is something the user already knows, being
            on the wrong street is not. */
-        strokeColor: stale ? STALE_COLOR : (vague ? colour : (selIn ? '#ffffff' : '#0f1216')),
+        strokeColor: (single && isWrongPlace(s)) || (single && isOffTown(s)) ? WRONG_COLOR
+          : stale ? STALE_COLOR : (vague ? colour : (selIn ? '#ffffff' : '#0f1216')),
         strokeWeight: stale ? 4 : (vague ? 2.5 : (selIn ? 3 : 1.5)),
         scale,
       };

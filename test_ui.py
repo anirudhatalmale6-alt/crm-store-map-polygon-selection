@@ -613,6 +613,52 @@ with sync_playwright() as p:
     ok("control positive: a precise pin carries no ring at all",
        weight["plainHasNoRing"], weight)
 
+    # ---------- a confident pin in the wrong town ----------
+    # Every other warning comes from Google grading its own answer, which cannot catch
+    # a confident ROOFTOP hit on a building in the wrong town. This checks Google
+    # against something Google never saw: where the OTHER stores in that town are.
+    town = page.evaluate("""() => {
+      // A town of four identical stores, plus one dropped 40 km away.
+      const base = { lat: 41.0, lng: -4.0 };
+      const mk2 = (n, dlat, city) => ({ id: 90000 + n, name: 'T' + n, cat: CATEGORIES[0].id,
+        statusCat: CATEGORIES[0].id, lat: base.lat + dlat, lng: base.lng,
+        city, prec: 'ROOFTOP', src: 'geocoded', addr: '', phone: '', mail: '', contact: '' });
+      const keep = stores;
+      stores = [mk2(1, 0, 'Villatest'), mk2(2, 0.001, 'Villatest'),
+                mk2(3, 0.002, 'Villatest'), mk2(4, 0.003, 'Villatest'),
+                mk2(5, 0.36, 'Villatest'),                       // ~40 km north
+                mk2(6, 0, 'No identificada'), mk2(7, 0.36, 'No identificada'),
+                mk2(8, 0, 'No identificada'), mk2(9, 0.72, 'No identificada')];
+      rebuildTowns(stores);
+      const out = {
+        spreadTown: TOWNS.has('villatest'),
+        junkTown: TOWNS.has('no identificada'),
+        flagged: stores.filter(isOffTown).map(s => s.id),
+        near: isOffTown(stores[0]), far: isOffTown(stores[4]),
+        gap: Math.round(townGap(stores[4])),
+        inReview: needsReview(stores[4]),
+        // ROOFTOP: Google said it was sure, so no other check would have caught it
+        precision: stores[4].prec,
+      };
+      // a town of three cannot judge anything
+      stores = [mk2(1, 0, 'Tresville'), mk2(2, 0.001, 'Tresville'), mk2(3, 0.36, 'Tresville')];
+      rebuildTowns(stores);
+      out.tooFewToJudge = !isOffTown(stores[2]);
+      stores = keep; rebuildTowns(stores);
+      return out;
+    }""")
+    ok("a confident pin far from its own town is flagged",
+       town["far"] and town["gap"] > 30, town)
+    ok("...even though Google rated it ROOFTOP, so nothing else would catch it",
+       town["precision"] == "ROOFTOP" and town["inReview"], town)
+    ok("control positive: the stores actually IN the town are not flagged",
+       not town["near"] and town["flagged"] == [90005], town)
+    # "No identificada" is not a town. Left in, they form one cloud whose centre is
+    # nowhere, and then every store in it looks wrong.
+    ok("a city column that is not a town is never used as a reference",
+       not town["junkTown"] and town["spreadTown"], town)
+    ok("a town with too few stores does not get to judge them", town["tooFewToJudge"], town)
+
     # ---------- the words used for a colour must match the colour ----------
     # STALE_COLOR was changed to pink at some point and the comments, the README and
     # very nearly the customer-facing legend all went on calling it "amber". Nobody
