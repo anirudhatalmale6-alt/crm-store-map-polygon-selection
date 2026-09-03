@@ -93,11 +93,22 @@ window.__stub = { markers: [], polylines: [], polygons: [], listeners: {}, curso
     }
   }
   class Marker {
-    constructor(o) { Object.assign(this, o); rec(window.__stub.markers, this); }
+    constructor(o) { Object.assign(this, o); this._on = {}; rec(window.__stub.markers, this); }
     setPosition(p) { this.position = p; } setIcon(i) { this.icon = i; }
     setLabel(l) { this.label = l; } setTitle(t) { this.title = t; }
     setDraggable(d) { this.draggable = d; } setMap(m) { this.map = m; if (!m) this._gone = true; }
-    addListener() {}
+    // Keeps the handlers so a test can fire a real click, instead of asserting that
+    // addListener was merely CALLED - which passes on a handler that throws.
+    addListener(ev, fn) { (this._on[ev] = this._on[ev] || []).push(fn); }
+    fire(ev, arg) { (this._on[ev] || []).forEach(f => f(arg)); }
+  }
+  class InfoWindow {
+    constructor(o) { Object.assign(this, o || {}); window.__stub.infoWindows =
+      (window.__stub.infoWindows || 0) + 1; window.__stub.info = this; }
+    setContent(c) { this.content = c; }
+    open(opts) { this.opened = (this.opened || 0) + 1; this.isOpen = true;
+                 this.anchor = opts && opts.anchor; }
+    close() { this.isOpen = false; }
   }
   class Polyline {
     constructor(o) { Object.assign(this, o); this._path = new MVCArray(o.path); rec(window.__stub.polylines, this); }
@@ -110,7 +121,7 @@ window.__stub = { markers: [], polylines: [], polygons: [], listeners: {}, curso
     setMap(m) { this.map = m; if (!m) this._gone = true; }
   }
   window.google = { maps: {
-    Map: Map_, Marker, Polyline, Polygon, LatLng, LatLngBounds,
+    Map: Map_, Marker, Polyline, Polygon, LatLng, LatLngBounds, InfoWindow,
     Size: function (w, h) { this.width = w; this.height = h; },
     Point: function (x, y) { this.x = x; this.y = y; },
     SymbolPath: { CIRCLE: 0 },
@@ -528,6 +539,74 @@ with sync_playwright() as p:
                             recompute(); }""")
     page.uncheck("#iconBox")
     page.select_option("#catMode", "status")
+
+    # ---------- click a pin, get the store ----------
+    # The customer asked for this instead of hovering and waiting for a tooltip. The
+    # handler is FIRED for real rather than asserting addListener was called - a
+    # registered handler that throws passes the second kind of test and does nothing
+    # on the map.
+    card = page.evaluate("""() => {
+      const m = window.__stub.markers.filter(x => !x._gone && x.draggable !== undefined)
+        .find(x => (x._on.click || []).length && (x._on.dragend || []).length);
+      if (!m) return { found: false };
+      m.fire('click');
+      const w = window.__stub.info;
+      const s = stores.find(x => w && w.content.includes(x.name));
+      return { found: true, opened: w && w.opened, isOpen: w && w.isOpen,
+               windows: window.__stub.infoWindows,
+               anchored: w && w.anchor === m,
+               hasPhone: !!(s && s.phone && w.content.includes(s.phone)),
+               hasMail: !!(s && (!s.mail || w.content.includes(s.mail))),
+               hasAddr: !!(s && s.addr && w.content.includes(s.addr)),
+               tracks: window.__card };
+    }""")
+    ok("clicking a pin opens a card on the Google surface",
+       card["found"] and card["isOpen"], card)
+    ok("...carrying the store's phone, e-mail and address",
+       card["hasPhone"] and card["hasMail"] and card["hasAddr"], card)
+    ok("...anchored to the pin that was clicked", card["anchored"], card)
+
+    reuse = page.evaluate("""() => {
+      const ms = window.__stub.markers.filter(x => !x._gone && (x._on.click||[]).length
+                                                 && (x._on.dragend||[]).length);
+      ms.slice(0, 3).forEach(m => m.fire('click'));
+      return { windows: window.__stub.infoWindows, opened: window.__stub.info.opened };
+    }""")
+    # One window reused. One per store would be 2,423 of them, and opening a second
+    # would leave the first on screen.
+    ok("clicking three pins reuses ONE info window rather than making three",
+       reuse["windows"] == 1 and reuse["opened"] >= 4, reuse)
+
+    closed = page.evaluate("""() => {
+      const l = (window.__stub.listeners.click || []).find(x => x.obj === window.__stub.map);
+      l.fn({ latLng: { lat: () => 40.42, lng: () => -3.70 } });
+      return { isOpen: window.__stub.info.isOpen, card: window.__card };
+    }""")
+    ok("clicking the map itself puts the card away",
+       not closed["isOpen"] and closed["card"] is None, closed)
+
+    # What actually keeps a card honest is that a single pin's marker is bound to ONE
+    # store for its whole life - the key is 's' + the id. Asserting that is worth more
+    # than the obvious "re-click shows an edited field" test, which cannot fail: the
+    # lookup returns the very object the handler closed over, so both versions pass.
+    # Checked by mutation before writing this.
+    bound = page.evaluate("""() => {
+      const singles = window.__stub.markers.filter(x => !x._gone
+        && (x._on.click||[]).length && (x._on.dragend||[]).length);
+      const ids = new Set();
+      let shared = 0;
+      for (const m of singles) {
+        m.fire('click');
+        const s = stores.find(x => window.__stub.info.content.includes(x.name));
+        if (!s) continue;
+        if (ids.has(s.id)) shared++;
+        ids.add(s.id);
+      }
+      return { markers: singles.length, distinct: ids.size, shared };
+    }""")
+    ok("every single pin's card belongs to a different store - no marker is shared",
+       bound["shared"] == 0 and bound["distinct"] == bound["markers"], bound)
+    ok("control positive: there were several single pins to check", bound["markers"] > 3, bound)
 
     # ---------- a half-initialised map must not look like a working one ----------
     # Google builds the basemap first and everything we add to it second, so a throw

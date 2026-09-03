@@ -58,6 +58,35 @@
                padding:0 8px 0 4px;cursor:pointer;white-space:nowrap;
                border-left:1px solid var(--line)}
   .tool-toggle input{cursor:pointer}
+  .storecard{position:absolute;z-index:7;width:246px;background:#171c22;
+             border:1px solid #2a323b;border-radius:9px;padding:11px 12px 10px;
+             box-shadow:0 8px 26px rgba(0,0,0,.55);font-size:12.5px}
+  .storecard .card b{display:block;font-size:13.5px;margin-bottom:5px;line-height:1.35;
+                     padding-right:14px}
+  .storecard .cat{display:flex;align-items:center;gap:6px;color:var(--muted);
+                  font-size:11.5px;margin-bottom:7px}
+  .storecard .cat .dot{width:9px;height:9px;border-radius:50%;flex:none}
+  .storecard small{display:block;color:var(--muted);font-size:11.5px;line-height:1.45;
+                   overflow-wrap:anywhere}
+  .storecard small.k{color:#8b97a6}
+  .storecard small.co{color:#6b7785;font-variant-numeric:tabular-nums;margin-top:5px}
+  .storecard small i{font-style:normal;color:#6b7785;margin-right:5px}
+  .storecard .x{position:absolute;top:5px;right:6px;background:none;border:0;
+                color:#8b97a6;font-size:17px;line-height:1;cursor:pointer;padding:2px 5px}
+  .storecard .x:hover{color:#e6ebf1}
+  /* Inside a Google InfoWindow the bubble is Google's, and it is white. The same
+     card markup therefore needs light-mode colours here, or it is grey text on white. */
+  .gcard{font:13px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;color:#1a1f26;
+         max-width:250px}
+  .gcard .card b{display:block;font-size:13.5px;margin-bottom:5px}
+  .gcard .cat{display:flex;align-items:center;gap:6px;color:#5a6673;font-size:11.5px;
+              margin-bottom:6px}
+  .gcard .cat .dot{width:9px;height:9px;border-radius:50%;flex:none}
+  .gcard small{display:block;color:#41505f;font-size:11.5px;line-height:1.45;
+               overflow-wrap:anywhere}
+  .gcard small.k{color:#8b97a6}
+  .gcard small.co{color:#8b97a6;font-variant-numeric:tabular-nums;margin-top:5px}
+  .gcard small i{font-style:normal;color:#8b97a6;margin-right:5px}
   .banner{position:absolute;bottom:12px;left:12px;z-index:5;font-size:11px;color:var(--muted);
           background:rgba(23,28,34,.94);border:1px solid var(--line);padding:5px 9px;border-radius:6px}
   .store{display:flex;gap:9px;align-items:flex-start;padding:8px;border-radius:7px;
@@ -219,6 +248,7 @@
     <div class="perfbar" id="perf"></div>
     <div id="offline"></div>
     <div id="gmap" style="display:none"></div>
+    <div class="storecard" id="card" style="display:none"></div>
     <div class="banner" id="banner">
       Offline preview &mdash; schematic tiles. Paste a Google Maps key above for the real basemap.
       Selection logic is identical in both modes.
@@ -664,16 +694,29 @@ function artPin(cat, o = {}) {
      pin that had not. The casing is what makes one ring legible on both, and the same
      trick rescues the grey imprecise ring, which is the one that has to show on 366
      Potential stores. */
-  const ring = (col, dash) => {
+  const ring = (col, dash, w, rr, op) => {
     const d = dash ? ` stroke-dasharray="${dash}"` : '';
-    const c = `cx="${cx}" cy="${cy}" r="${r + 1.1}" fill="none"`;
-    return `<circle ${c} stroke="#0f1216" stroke-width="3.4" opacity=".5"${d}/>` +
-           `<circle ${c} stroke="${col}" stroke-width="1.8"${d}/>`;
+    const c = `cx="${cx}" cy="${cy}" r="${r + (rr == null ? 1.1 : rr)}" fill="none"`;
+    return `<circle ${c} stroke="#0f1216" stroke-width="${(w || 1.8) + 1.6}" opacity="${(op || 1) * .5}"${d}/>` +
+           `<circle ${c} stroke="${col}" stroke-width="${w || 1.8}"${d}/>`;
   };
   /* Imprecise keeps the pin's own colour and states it as a broken ring - the same
      "Google was not sure" that the hollow pin means, said in the only channel a fixed
-     image leaves open. */
-  const halo = (o.stroke ? ring(o.stroke) : '') + (o.hollow ? ring(colorOf(cat), '2.6 2.2') : '');
+     image leaves open.
+
+     It is deliberately QUIET. 570 of 2,423 stores carry this mark, so at the loud
+     weight it had first, a quarter of the map was spikes and the other three quarters
+     - the actual customers - read as background. "Aesthetically overwhelming the rest"
+     was the exact complaint, and it was right: a status that common cannot shout.
+     Thinner, tighter to the pin, finer dashes.
+
+     It gets loud again in "Pins worth checking", because there the marked ones are the
+     entire subject and everything else has been filtered away. Same information, weight
+     matched to whether you are looking at the map or working through the list. */
+  const loud = reviewOnly;
+  const halo = (o.stroke ? ring(o.stroke) : '')
+    + (o.hollow ? (loud ? ring(colorOf(cat), '2.6 2.2', 1.8, 1.1)
+                        : ring(colorOf(cat), '1.5 2.3', 1.0, 0.3, .85)) : '');
   return halo + `<image href="${a.art}" x="${x}" y="${y}" width="${w}" height="${ART_H}"/>`;
 }
 
@@ -967,6 +1010,50 @@ function contactLines(s) {
     s.mail ? `<small><i>Email</i>${esc(s.mail)}</small>` : miss('no e-mail on record'),
     s.addr ? `<small><i>Addr</i>${esc(s.addr)}</small>` : '',
   ].join('');
+}
+
+/* One card, two mounts. Clicking a pin is how you ask "who is this?", and the answer
+   has to be the same sentence whether the map underneath is Google's or the offline
+   preview - so the CONTENT is built once here and only the container differs
+   (a Google InfoWindow, or a positioned div over the preview). Two copies of this
+   markup is how the two surfaces start disagreeing about what a store is.
+
+   It reuses contactLines(), so a store with no e-mail says so here exactly as it does
+   in the polygon list rather than quietly dropping the row. */
+/* The card over the offline preview. The Google surface uses an InfoWindow instead,
+   because it has to survive the user panning the map underneath it - which a div
+   positioned once at a pixel does not. Same storeCard() inside both. */
+function showCard(s, x, y) {
+  const el = $('card');
+  el.innerHTML = storeCard(s) + '<button class="x" id="cardX">&times;</button>';
+  el.style.display = 'block';
+  const wrap = $('mapwrap').getBoundingClientRect();
+  const b = el.getBoundingClientRect();
+  // Keep it inside the map: near the right edge it flips to the left of the pin, and
+  // near the bottom it sits above. Otherwise the card for a store on the coast opens
+  // half off-screen, which reads as the click having failed.
+  el.style.left = Math.max(8, Math.min(x + 14, wrap.width - b.width - 8)) + 'px';
+  el.style.top = Math.max(8, Math.min(y - 10, wrap.height - b.height - 8)) + 'px';
+  $('cardX').onclick = ev => { ev.stopPropagation(); hideCard(); };
+  window.__card = s.id;
+}
+function hideCard() { $('card').style.display = 'none'; window.__card = null; }
+
+function storeCard(s) {
+  const cat = catById[s.cat];
+  const bits = [];
+  if (isVague(s)) bits.push('approximate position');
+  if (isStale(s)) bits.push('address changed since this pin was placed');
+  if (isWrongPlace(s)) bits.push('outside Colombia');
+  if (s.src === 'manual') bits.push('moved by hand');
+  return `<div class="card">
+    <b>${esc(s.name)}</b>
+    <div class="cat"><span class="dot" style="background:${cat ? cat.color : '#8b97a6'}"></span>
+      ${esc(cat ? cat.label : s.cat)}</div>
+    ${contactLines(s)}
+    <small class="co">${s.lat.toFixed(5)}, ${s.lng.toFixed(5)}</small>
+    ${bits.length ? `<small class="k">${bits.join(' &middot; ')}</small>` : ''}
+  </div>`;
 }
 
 function renderSelection() {
@@ -1328,7 +1415,20 @@ const OfflineSurface = (() => {
       // user's next vertex instead - a click that just does nothing.
       const wasDrag = dragged;
       dragged = false;
-      if (!drawing || wasDrag) return;
+      if (!drawing) {
+        /* Click a pin, get the store. Checked against wasDrag: nudging a pin into
+           place ends in a click, and popping a card open every time somebody corrects
+           a position would make the correction feel like a misfire. */
+        if (wasDrag) return;
+        const sid = sidOf(e.target);
+        const s = sid && stores.find(x => x.id === Number(sid));
+        if (s) { showCard(s, e.clientX - host.getBoundingClientRect().left,
+                             e.clientY - host.getBoundingClientRect().top); }
+        else hideCard();
+        return;
+      }
+      if (wasDrag) return;
+      hideCard();
       const r = host.getBoundingClientRect();
       polygon.push({ lat: toLat(e.clientY - r.top), lng: toLng(e.clientX - r.left) });
       recompute();
@@ -1339,9 +1439,24 @@ const OfflineSurface = (() => {
        ambiguous (which of the 40 stores did you mean to move?), so bubbles keep
        their zoom-in behaviour instead. While the polygon tool is active, dragging
        is off entirely: the two gestures are both "press on the map and move". */
+    /* Which store did the pointer land on?
+       NOT e.target.dataset.sid. A dot pin IS the element carrying data-sid, but an
+       icon pin is a <g data-sid> wrapping a <path>, and an artwork pin wraps an
+       <image> - in both of those the event target is the child, which carries
+       nothing. Reading the target directly therefore worked in dot mode and silently
+       did nothing in the two modes the customer actually uses: dragging a pin to
+       correct its position, advertised in the sidebar, has never worked with icon
+       pins on. Found by making a test's control positive honest - the drag assertion
+       had been passing because the drag never happened.
+       closest() walks up to whichever ancestor owns the id. */
+    const sidOf = t => {
+      const el = t && t.closest && t.closest('[data-sid]');
+      return el ? el.dataset.sid : null;
+    };
+
     svg.onmousedown = e => {
       if (drawing) return;
-      const sid = e.target && e.target.dataset && e.target.dataset.sid;
+      const sid = sidOf(e.target);
       if (!sid) return;
       e.preventDefault();
       const s = stores.find(x => x.id === Number(sid));
@@ -1401,7 +1516,18 @@ const OfflineSurface = (() => {
 
 /* --- 4b. Google Maps surface (needs the client's API key) --- */
 const GoogleSurface = (() => {
-  let map, markers = new Map(), gPoly = null, polySig = null;
+  let map, markers = new Map(), gPoly = null, polySig = null, info = null;
+
+  /* One InfoWindow reused, not one per marker. Google's own docs make this point and
+     it matters at this scale: a window per store would be 2,423 of them, and opening
+     a second would leave the first on screen. Reusing it also gives "click another pin
+     and the first card closes" for free, which is what a person expects. */
+  function openInfo(s, marker) {
+    if (!info) info = new google.maps.InfoWindow();
+    info.setContent(`<div class="gcard">${storeCard(s)}</div>`);
+    info.open({ map, anchor: marker });
+    window.__card = s.id;
+  }
 
   function init() {
     const b = OfflineSurface.bounds();
@@ -1429,6 +1555,8 @@ const GoogleSurface = (() => {
      * point interaction is now IDENTICAL to the offline preview, instead of two
      * different gestures depending on whether a key is present. */
     google.maps.event.addListener(map, 'click', e => {
+      // Clicking the map itself, rather than a pin, puts the card away.
+      if (info) { info.close(); window.__card = null; }
       if (!drawing) return;
       polygon.push({ lat: e.latLng.lat(), lng: e.latLng.lng() });
       recompute();
@@ -1647,6 +1775,18 @@ const GoogleSurface = (() => {
         if (single) {
           m.addListener('dragend', ev =>
             moveStore(s.id, ev.latLng.lat(), ev.latLng.lng(), { manual: true }));
+          /* Click for the details, read from the store by id at click time.
+             Not because the marker could belong to another store - it could not: a
+             single pin's key is 's' + the store id, so a marker is bound to one store
+             for its whole life, and I checked that before writing this rather than
+             leaving a comment claiming a danger that does not exist. It is looked up
+             so the card shows the row as it is NOW: edit a phone number in the CRM and
+             the next click says the new one, without depending on whether the edit
+             mutated the object or replaced it. */
+          m.addListener('click', () => {
+            const cur = stores.find(x => x.id === s.id);
+            if (cur) openInfo(cur, m);
+          });
         } else {
           // Clicking a cluster zooms into it, which is how you get from 2,000
           // pins down to the individual store without a scrolling list.

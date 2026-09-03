@@ -474,6 +474,145 @@ with sync_playwright() as p:
     ok("control positive: the box really did cover every store",
        same["grouped"] == same["total"], same)
 
+    # ---------- click a pin, get the store ----------
+    # Driven with a real mouse at real coordinates, not by calling the handler: the
+    # thing being tested is that a click LANDS on the pin, and a synthetic call proves
+    # nothing about whether anything is on top of it.
+    page.click("#clearBtn")
+    page.check("#clusterBox")
+    page.uncheck("#clusterBox")
+    pin = page.query_selector("#offline g.pin, #offline circle.pin")
+    pbox = pin.bounding_box()
+    page.mouse.click(pbox["x"] + pbox["width"] / 2, pbox["y"] + pbox["height"] / 2)
+    page.wait_for_timeout(120)
+    click = page.evaluate("""() => {
+      const el = document.getElementById('card');
+      const s = stores.find(x => x.id === window.__card);
+      const t = el.textContent || '';
+      return { shown: getComputedStyle(el).display !== 'none', id: window.__card,
+               name: !!(s && t.includes(s.name)),
+               phone: !!(s && s.phone && t.includes(s.phone)),
+               addr: !!(s && s.addr && t.includes(s.addr)),
+               mail: !!(s && (!s.mail ? t.includes('no e-mail on record') : t.includes(s.mail))),
+               inside: (() => { const w = document.getElementById('mapwrap')
+                                  .getBoundingClientRect(), b = el.getBoundingClientRect();
+                 return b.left >= w.left - 1 && b.right <= w.right + 1
+                     && b.top >= w.top - 1 && b.bottom <= w.bottom + 1; })() };
+    }""")
+    ok("clicking a pin opens its card", click["shown"] and click["id"] is not None, click)
+    ok("...with the name, phone and address on it",
+       click["name"] and click["phone"] and click["addr"], click)
+    # A blank column and a broken card look identical. Says so rather than dropping it.
+    ok("...and it says so when a field is empty rather than hiding the row",
+       click["mail"], click)
+    # A store on the coast is near the edge of the map; a card that opens half off the
+    # screen reads as the click having failed.
+    ok("...and the card stays inside the map", click["inside"], click)
+
+    # Clicking empty map puts it away again.
+    page.mouse.click(pbox["x"] + 240, pbox["y"] + 190)
+    page.wait_for_timeout(120)
+    ok("clicking away from a pin closes the card",
+       page.evaluate("() => getComputedStyle(document.getElementById('card')).display === 'none'"))
+
+    # Nudging a pin into place ends in a click. If that opened a card every time, the
+    # correction would feel like a misfire.
+    # The pin has to be RE-LOCATED first: the clicks above changed the drawing, so the
+    # box measured earlier is stale. Without that, the "drag" lands on empty map, no
+    # card opens because nothing was clicked, and the assertion passes having tested
+    # nothing - which is exactly what it did until the mutation check caught it.
+    # BOTH pin modes. A dot pin is the element carrying data-sid; an icon pin is a
+    # group wrapping a path. Reading the event target directly worked in the first and
+    # silently did nothing in the second, so dragging a pin - advertised in the sidebar
+    # - had never worked with icon pins on, which is the mode the customer's artwork
+    # runs in. Only the control positive exposed it: the old assertion passed because
+    # the drag was not happening at all.
+    for mode, on in (("dot", False), ("icon", True)):
+        if on: page.check("#iconBox")
+        else:  page.uncheck("#iconBox")
+        page.wait_for_timeout(200)
+        page.evaluate("() => hideCard()")
+        sel = "#offline g.pin" if on else "#offline circle.pin"
+        el = page.query_selector(sel)
+        bb = el.bounding_box()
+        # A teardrop is anchored at its point, so aim at the head, not the centre.
+        cx, cy = bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] * (0.35 if on else 0.5)
+        # WHICH pin is under those coordinates, not which one came first in the DOM.
+        # The stress set is loaded by now, so pins overlap and the topmost one wins the
+        # click. Assuming the first element in document order is the one being hit is
+        # how this reported "the pin did not move" about a pin nobody touched.
+        sid = page.evaluate("""(pt) => {
+          const t = document.elementFromPoint(pt.x, pt.y);
+          const el = t && t.closest && t.closest('[data-sid]');
+          return el ? Number(el.dataset.sid) : null;
+        }""", {"x": cx, "y": cy})
+        ok(f"control positive: the {mode} click coordinates land on a pin",
+           sid is not None, {"x": cx, "y": cy})
+        if sid is None:
+            continue
+        pos = lambda: page.evaluate("id => { const s = stores.find(x => x.id === id);"
+                                    "return [s.lat, s.lng]; }", sid)
+        before_xy = pos()
+        page.mouse.move(cx, cy)
+        page.mouse.down()
+        page.mouse.move(cx + 30, cy + 20, steps=8)
+        page.mouse.up()
+        page.wait_for_timeout(150)
+        moved = pos() != before_xy
+        ok(f"a {mode} pin can be dragged to correct its position", moved,
+           {"before": before_xy, "after": pos()})
+        ok(f"...and that drag does NOT pop a card open ({mode})",
+           moved and page.evaluate(
+               "() => getComputedStyle(document.getElementById('card')).display === 'none'"))
+        # And a plain click, in the same mode, must open the card for whichever pin is
+        # actually on top at that point - which after a drag is not necessarily the one
+        # just dropped there, because 2,000 stores overlap.
+        under = page.evaluate("""(pt) => {
+          const t = document.elementFromPoint(pt.x, pt.y);
+          const el = t && t.closest && t.closest('[data-sid]');
+          return el ? Number(el.dataset.sid) : null;
+        }""", {"x": cx + 30, "y": cy + 20})
+        page.mouse.click(cx + 30, cy + 20)
+        page.wait_for_timeout(140)
+        ok(f"...while a click opens the card for the pin under the cursor ({mode})",
+           under is not None and page.evaluate("() => window.__card") == under,
+           {"card": page.evaluate("() => window.__card"), "under": under})
+        page.evaluate("() => hideCard()")
+    page.uncheck("#iconBox")
+
+    # ---------- the check-these ring is quiet on the map, loud in review ----------
+    # "Aesthetically overwhelming the rest" - 570 of 2,423 stores carry this mark, so
+    # it cannot shout. Measured as ink: pixels the ring adds over a plain pin.
+    # The ring only exists on ARTWORK pins - a drawn pin says "imprecise" by going
+    # hollow, which needs no ring. The demo set carries no artwork, so this attaches a
+    # fixture one; without it this whole block measures the built-in pin and reports a
+    # confident zero about a feature it never reached.
+    weight = page.evaluate("""() => {
+      const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ'
+                + 'AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+      const c = { id:'__ring', label:'Ring', color:'#868686', glyph: GLYPH.star,
+                  art: { w:64, h:88, head:{cx:0.5, cy:0.2955, r:0.5}, art: PNG } };
+      ART_STATE.set('__ring', 'ok');
+      const len = svg => (svg.match(/<circle/g) || []).length;
+      const w = svg => [...svg.matchAll(/stroke-width="([\\d.]+)"/g)]
+                        .reduce((a, m) => a + Number(m[1]), 0);
+      const was = reviewOnly;
+      reviewOnly = false; const quiet = pinSvg(c, { hollow: true });
+      reviewOnly = true;  const loud  = pinSvg(c, { hollow: true });
+      reviewOnly = was;
+      const plain = pinSvg(c);
+      ART_STATE.delete('__ring');
+      return { quietRings: len(quiet) - len(plain), loudRings: len(loud) - len(plain),
+               quietInk: w(quiet) - w(plain), loudInk: w(loud) - w(plain),
+               plainHasNoRing: len(plain) === 0 };
+    }""")
+    ok("an imprecise pin is still marked on the normal map",
+       weight["quietRings"] == 2 and weight["quietInk"] > 0, weight)
+    ok("...but noticeably lighter than it is in review mode",
+       weight["quietInk"] < weight["loudInk"] * 0.75, weight)
+    ok("control positive: a precise pin carries no ring at all",
+       weight["plainHasNoRing"], weight)
+
     # ---------- the words used for a colour must match the colour ----------
     # STALE_COLOR was changed to pink at some point and the comments, the README and
     # very nearly the customer-facing legend all went on calling it "amber". Nobody
