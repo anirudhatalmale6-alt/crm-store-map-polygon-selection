@@ -488,6 +488,44 @@ with sync_playwright() as p:
     ok("...and your artwork is inside the marker, not linked from it",
        artg["withArt"] > 0 and artg["remote"] == 0, artg)
     page.uncheck("#artBox")
+
+    # ---------- a whole-marker `art` on the Google surface ----------
+    # Their artwork is a finished teardrop, so it is fitted into the same 24-box the
+    # drawn pin uses. That is what keeps the anchor honest: the marker hangs by the
+    # POINT of the pin, and a picture with a different aspect ratio centred in the box
+    # would leave every store sitting a few metres north of its own coordinates.
+    page.select_option("#catMode", "status")
+    page.check("#iconBox")
+    whole = page.evaluate("""() => {
+      const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ'
+                + 'AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+      const c = CATEGORIES[0];
+      c.art = { w:64, h:88, head:{cx:0.5, cy:0.2955, r:0.5}, art: PNG };
+      ART_STATE.set(c.id, 'ok');
+      window.__calls = 0;
+      recompute();
+      const m = window.__stub.markers.filter(x => !x._gone)
+        .find(x => x.icon && typeof x.icon.url === 'string'
+                && decodeURIComponent(x.icon.url.split(',')[1]).includes('<image'));
+      if (!m) return { found:false };
+      const svg = decodeURIComponent(m.icon.url.split(',')[1]);
+      return { found:true, calls: window.__calls,
+               // the anchor must be the pin's point: the bottom of the box, not its middle
+               anchorY: m.icon.anchor && m.icon.anchor.y,
+               height: m.icon.scaledSize && m.icon.scaledSize.height,
+               inline: !/<image[^>]+href="https?:/.test(svg),
+               // and the drawn teardrop must be GONE, or it is a pin inside a pin
+               noDrawnPin: !svg.includes(PIN_PATH) };
+    }""")
+    ok("a whole-marker artwork reaches the Google surface as an inline picture",
+       whole["found"] and whole["inline"] and whole["noDrawnPin"], whole)
+    ok("...it repaints the markers rather than waiting for the next unrelated redraw",
+       whole.get("calls", 0) > 0, whole)
+    # 23 of the 24-unit box, times the same scale the icon is drawn at.
+    ok("...and the marker still hangs by the point of the pin, not by its centre",
+       whole["found"] and abs(whole["anchorY"] - whole["height"] * 23 / 24) < 0.6, whole)
+    page.evaluate("""() => { CATEGORIES.forEach(c => { delete c.art; ART_STATE.delete(c.id); });
+                            recompute(); }""")
     page.uncheck("#iconBox")
     page.select_option("#catMode", "status")
 

@@ -35,8 +35,8 @@ The selection engine is identical in both modes; only the tiles change.
 
 ```
 node test-selection.js        # 32 assertions on the selection + clustering engines
-python3 test_ui.py            # 107 assertions driving the real browser + screenshots
-python3 test_gmaps_surface.py # 59 assertions on the GOOGLE surface, with no API key
+python3 test_ui.py            # 114 assertions driving the real browser + screenshots
+python3 test_gmaps_surface.py # 62 assertions on the GOOGLE surface, with no API key
 node server/test_export.js    # 21 assertions on what each export is allowed to carry
 node server/test_schema.js    # 42 assertions on the table/column config (no database)
 node server/test_geocoder.js  # 26 assertions on the geocoder (stubbed fetch, no cost)
@@ -45,7 +45,7 @@ node server/test_batch.js     # 53 assertions on the bulk geocoding run (real My
 node server/test_ventas.js    # 60 assertions against YOUR schema and YOUR 2,657 rows
 ```
 
-489 assertions. `test_ventas.js` is the one that matters most, because it is the
+499 assertions. `test_ventas.js` is the one that matters most, because it is the
 only suite whose inputs I did not choose — it runs over your actual data, and every
 correction listed under "Your actual database, measured" below was forced by it.
 
@@ -1320,3 +1320,76 @@ individual's tax identity.** Whatever you decide about which pins go on the publ
 map, what protects those people is what each pin *carries*. A trade name and a
 coordinate is a shop. A trade name, a coordinate, a mobile number and a personal
 e-mail is a person's contact card.
+
+
+## Your own pin artwork (Pin-Pura / Pin-Potential / Pin-Inactive)
+
+Your three files are now what the map draws. They are a **whole marker** — your
+teardrop, your colour, your logo — which is a different thing from the symbol-inside-
+my-pin hook further up this file, and it is handled differently: `art` *replaces* the
+built-in pin instead of sitting inside it. Drawing it the other way gives a pin inside
+a pin, so there is an assertion for exactly that.
+
+`python3 tools/build-pin-art.py <folder with the Pin-*.png> > pin-art.js` does the
+conversion. Neither the artwork nor the generated file is in this repository: it is
+your branding, not mine to publish. Re-run it whenever the artwork changes.
+
+Three things that script fixes, each of which would otherwise reach the map:
+
+**Pin-Pura arrived as a JPEG.** It is named `.png`, but the bytes are JPEG, and JPEG
+has no transparency — so the corners around the teardrop are solid white, and a white
+box is what the map would have drawn behind every active store. The background is
+recovered by flood-filling white **inward from the border**, not by "make white
+transparent": the white disc in the middle of your pin is enclosed by the blue body
+and cannot be reached from the edge, so it survives. The naive version punches a hole
+straight through the PüRa logo. Measured after the fix: the recovered silhouette
+differs from your grey pin by 0.03% of pixels — same artwork, different export.
+
+**The colours are sampled out of the artwork, not typed in.** `#001db1`, `#868686`,
+`#399fc1`, read from the tip of each pin where there is nothing but body colour. That
+is what makes the round markers and the cluster rings the *same* blue, grey and
+turquoise as the pins rather than a close match. A hex copied by eye is how a legend
+ends up quietly disagreeing with the map.
+
+**The originals are 1353×1868 and ~130 KB each.** A marker is drawn at about 44 px, so
+they are resampled to 88 px (2× for retina) and the transparent margin is trimmed, so
+that the pin's *point* is the bottom edge of the image — the marker hangs by that
+edge, and a stray margin would leave every store sitting a few metres north of its own
+coordinates. 394 KB of artwork becomes 33 KB inline, once.
+
+### What could not come across, and where it went instead
+
+A photograph cannot be recoloured, and the map has three states that used to work by
+recolouring the pin: **selected**, **imprecise**, and **address changed since the pin
+was placed**. On your data that is not a detail — **570 of your 2,423 pinned stores
+(23.5%) are the imprecise ones**. Those states are now drawn as a **ring around the
+head of the pin**, and the ring's position is measured from your artwork rather than
+hard-coded, so it still lands on the head the day you send a differently-shaped pin.
+
+Every ring is drawn twice: a dark casing, then the colour on top. The selected ring is
+white, and Google's basemap is near-white — without the casing a selected pin would
+look exactly like an unselected one on the surface you will actually use.
+
+An `art` that fails to decode falls back to the drawn pin, **never to nothing** — same
+rule as the icon hook, and it matters more here, because a failed whole-marker image
+would be an empty space where a store is while the counter still said 2,423 on map.
+
+### Coverage of your real statuses
+
+| status | pin | stores | share |
+|---|---|---:|---:|
+| Active | Pin-Pura (dark blue `#001db1`) | 1,132 | 46.7% |
+| Potential | Pin-Potential (grey `#868686`) | 1,253 | 51.7% |
+| Inactive | Pin-Inactive (turquoise `#399fc1`) | 38 | 1.6% |
+
+Three pins, 2,423 stores, nothing left over — there is no fourth status hiding in the
+data. A status with no artwork keeps its drawn pin rather than vanishing or borrowing
+somebody else's, which is what happens the day a fourth one is added to the CRM and
+nobody has drawn a pin for it.
+
+Two things worth knowing before this is final. **Potential and Inactive are the same
+picture** — an empty white disc — differing only in the rim colour, so at the smallest
+zoom they are told apart by colour alone. And **the biggest group on your map is the
+grey one**: 1,253 Potential against 1,132 Active. That reads as deliberate (your
+customers pop, your prospects recede) but it is worth saying out loud rather than
+discovering it on screen.

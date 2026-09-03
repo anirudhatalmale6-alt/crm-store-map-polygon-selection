@@ -588,6 +588,63 @@ with sync_playwright() as p:
     ok("turning it back off restores the built-in shapes",
        page.evaluate("() => !pinSvg(typeById['drugstore']).includes('<image')"))
 
+    # ---------- artwork that IS the pin (the customer's own marker) ----------
+    # Their three files are a WHOLE marker, not a symbol to put inside mine, and the
+    # real ones live in pin-art.js which is deliberately not in the repository. So
+    # this builds its own, from a 1x1 PNG, and asserts the mechanism rather than the
+    # file: a fixture that cannot be missing on a fresh clone.
+    art2 = page.evaluate("""() => {
+      const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ'
+                + 'AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+      const cat = { id:'__art', label:'Art', color:'#001db1',
+                    glyph: GLYPH.bag,
+                    art: { w:64, h:88, head:{cx:0.5, cy:0.2955, r:0.5}, art: PNG } };
+      const before = pinSvg(cat);                 // not verified yet
+      ART_STATE.set('__art', 'ok');
+      const plain = pinSvg(cat);
+      const sel   = pinSvg(cat, { stroke:'#ffffff' });
+      const vague = pinSvg(cat, { hollow:true });
+      ART_STATE.set('__art', 'bad');
+      const broken = pinSvg(cat);
+      ART_STATE.delete('__art');
+      const cy = s => { const m = s.match(/cy="([\\d.]+)"/); return m ? Number(m[1]) : null; };
+      return {
+        beforeIsDrawn: before.includes('<path') && !before.includes('<image'),
+        plainHasImage: plain.includes('<image'),
+        plainHasNoPinPath: !plain.includes(PIN_PATH),
+        selRings: (sel.match(/<circle/g) || []).length,
+        selHasCasing: sel.includes('#0f1216'),
+        selHasWhite: sel.includes('#ffffff'),
+        vagueDashed: vague.includes('stroke-dasharray'),
+        vagueInCatColour: vague.includes('#001db1'),
+        plainNoRing: !plain.includes('<circle'),
+        ringCy: cy(sel),
+        brokenIsDrawn: broken.includes('<path') && !broken.includes('<image'),
+      };
+    }""")
+    # The whole point of `art`: it REPLACES the built-in teardrop. Drawing it inside
+    # the teardrop would put a pin inside a pin, and both assertions below would still
+    # pass on the image alone - hence checking the pin path is gone too.
+    ok("your artwork replaces the built-in pin instead of sitting inside it",
+       art2["plainHasImage"] and art2["plainHasNoPinPath"], art2)
+    ok("control positive: before the image has decoded it is the drawn pin, not nothing",
+       art2["beforeIsDrawn"], art2)
+    # An image cannot be recoloured, so selection and imprecision have to become a
+    # ring. If these silently stopped rendering, 570 of 2,423 real pins would lose the
+    # only mark that says Google was unsure where they are.
+    ok("a selected artwork pin still gets a ring, drawn over a dark casing",
+       art2["selRings"] == 2 and art2["selHasCasing"] and art2["selHasWhite"], art2)
+    ok("...and an imprecise one gets a broken ring in its own colour",
+       art2["vagueDashed"] and art2["vagueInCatColour"], art2)
+    ok("control positive: a plain artwork pin draws no ring at all",
+       art2["plainNoRing"], art2)
+    # Measured from the artwork, so it lands on the round head. A constant would put
+    # it across the point the day the artwork changes proportions.
+    ok("the ring lands on the head of the pin, not across its point",
+       art2["ringCy"] is not None and 3 < art2["ringCy"] < 14, art2["ringCy"])
+    ok("artwork that fails to decode falls back to the drawn pin, never to nothing",
+       art2["brokenIsDrawn"], art2)
+
     # ---------- what the polygon hands back ----------
     page.select_option("#catMode", "status")
     page.uncheck("#iconBox")

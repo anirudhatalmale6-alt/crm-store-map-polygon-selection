@@ -5,3 +5,12 @@ map-data.json
 
 # Real-data renders. These show your customers by name.
 shots/*-real-*.png
+real-shots/
+
+# Your pin artwork and anything built from it. Your branding, not mine to publish -
+# and the built file is 34 KB of base64 that would be re-generated anyway.
+# Rebuild:  python3 tools/build-pin-art.py <folder with the Pin-*.png> > pin-art.js
+pin-art.js
+Pin-*.png
+Pin-*.jpg
+pins/

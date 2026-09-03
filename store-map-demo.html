@@ -230,6 +230,13 @@
      NOT in the repository: it carries your store names and addresses. -->
 <script src="map-data.js"></script>
 
+<!-- Your pin artwork, converted to something a marker can actually carry.
+     `python3 tools/build-pin-art.py <folder with the Pin-*.png> > pin-art.js` writes
+     it. Also NOT in the repository - it is your branding, not mine to publish - and
+     like the export above, this tag does nothing when the file is absent and the map
+     falls back to the drawn pins. -->
+<script src="pin-art.js"></script>
+
 <script>
 /* ------------------------------------------------------------------ *
  * 1. Selection engine  (pure, no map dependency)
@@ -361,6 +368,25 @@ const REAL_CATEGORIES = [
   { id:'potential', label:'Potential',      color:'#ffb454', glyph:GLYPH.star },
   { id:'inactive',  label:'Inactive store', color:'#8b97a6', glyph:GLYPH.cross },
 ];
+
+/* Your artwork, when pin-art.js is present, replaces BOTH halves of how a status
+   looks: the pin becomes your teardrop, and the colour of the round marker and of
+   the cluster ring becomes the colour sampled out of that same teardrop. That is the
+   point of sampling rather than typing a hex - "the same colour" has to survive
+   somebody re-exporting the artwork one shade off, and a number copied by eye does
+   not. The colours above stay as the fallback for a map with no artwork loaded.
+
+   A status with no artwork keeps its drawn pin. That is not a placeholder for a
+   missing file: the day a fourth status appears in the CRM and nobody has drawn a pin
+   for it, it gets a shape and a colour of its own instead of vanishing or borrowing
+   somebody else's. */
+const PIN_ART = (typeof window !== 'undefined' && window.__PIN_ART__) || null;
+if (PIN_ART) {
+  REAL_CATEGORIES.forEach(c => {
+    const a = PIN_ART[c.id];
+    if (a && a.art) { c.art = a; c.color = a.color || c.color; }
+  });
+}
 const DEMO_CATEGORIES = [
   { id:'active',    label:'Active',    color:'#3ddc97', glyph:GLYPH.bag },
   { id:'potential', label:'Potential', color:'#ffb454', glyph:GLYPH.star },
@@ -566,7 +592,73 @@ function checkIcons(types, done) {
 }
 const iconFor = cat => (cat && cat.icon && ICON_STATE.get(cat.id) === 'ok') ? cat.icon : null;
 
+/* A whole-marker `art` needs the same proof as a glyph `icon`, and needs it more:
+   a glyph that fails to decode costs a pin its symbol, but an `art` that fails to
+   decode costs the pin ITSELF - the marker would be an empty box at the store's
+   coordinates, and the counter would still say 2,423 on map. So art is verified the
+   same way, by loading it once on purpose, and until it has decoded the map draws the
+   built-in teardrop. Never nothing. */
+const ART_STATE = new Map();
+function checkArt(cats, done) {
+  const list = cats.filter(c => c.art && c.art.art);
+  if (!list.length) { done && done(); return; }
+  let left = list.length;
+  const tick = () => { if (--left === 0 && done) done(); };
+  list.forEach(c => {
+    const im = new Image();
+    im.onload = () => { ART_STATE.set(c.id, im.naturalWidth > 0 ? 'ok' : 'bad'); tick(); };
+    im.onerror = () => { ART_STATE.set(c.id, 'bad'); tick(); };
+    im.src = c.art.art;
+  });
+}
+const artOk = cat => Boolean(cat && cat.art && cat.art.art && ART_STATE.get(cat.id) === 'ok');
+
+/* ---- Artwork that IS the pin, rather than artwork inside mine ------------------
+   There are two different things a customer can send, and they need different
+   handling:
+
+     `icon`  a symbol that goes in the round part of MY teardrop - a cross, a trolley.
+             The pin is still drawn by this page, so it can still be recoloured.
+     `art`   a finished marker: their own teardrop, their own colour, their own logo.
+             This one REPLACES my pin. Drawing it inside my pin gives a pin in a pin.
+
+   The catch, and it is the whole reason this is more than an <image> tag: every state
+   the map shows by recolouring - selected, imprecise, address-changed - cannot
+   recolour a photograph. On 2,423 real stores that is not a corner case; 570 of them
+   (23.5%) are the imprecise ones. So for `art` those states move to a RING drawn
+   around the head of the pin, and the ring's position comes from the artwork's own
+   measured geometry (see tools/build-pin-art.py) rather than from a constant that
+   would land across the point the day the artwork changes shape. */
+const ART_H = 20;      // leaves 4 units of the 24-box for the ring to live in
+function artPin(cat, o = {}) {
+  const a = cat.art;
+  const w = ART_H * (a.w / a.h), x = 12 - w / 2, y = 23 - ART_H;
+  const cx = x + w * a.head.cx, cy = y + ART_H * a.head.cy, r = w * a.head.r;
+  /* Order matters: the ring is drawn FIRST so the artwork sits on top of it and the
+     ring reads as a halo behind the pin rather than a scribble over the logo.
+
+     Every ring is drawn twice - a dark casing, then the colour on top. That is not
+     decoration. The selected ring is white because the offline preview is dark, and
+     on Google's own basemap, which is near-white, a white ring on a white background
+     is nothing at all: the pin would go into the selection and look exactly like a
+     pin that had not. The casing is what makes one ring legible on both, and the same
+     trick rescues the grey imprecise ring, which is the one that has to show on 366
+     Potential stores. */
+  const ring = (col, dash) => {
+    const d = dash ? ` stroke-dasharray="${dash}"` : '';
+    const c = `cx="${cx}" cy="${cy}" r="${r + 1.1}" fill="none"`;
+    return `<circle ${c} stroke="#0f1216" stroke-width="3.4" opacity=".5"${d}/>` +
+           `<circle ${c} stroke="${col}" stroke-width="1.8"${d}/>`;
+  };
+  /* Imprecise keeps the pin's own colour and states it as a broken ring - the same
+     "Google was not sure" that the hollow pin means, said in the only channel a fixed
+     image leaves open. */
+  const halo = (o.stroke ? ring(o.stroke) : '') + (o.hollow ? ring(colorOf(cat), '2.6 2.2') : '');
+  return halo + `<image href="${a.art}" x="${x}" y="${y}" width="${w}" height="${ART_H}"/>`;
+}
+
 function pinSvg(cat, o = {}) {
+  if (artOk(cat)) return artPin(cat, o);
   const body = o.hollow ? '#141a21' : colorOf(cat);
   const ink = o.hollow ? colorOf(cat) : '#0f1216';
   const g = cat.glyph;
@@ -1518,8 +1610,14 @@ const GoogleSurface = (() => {
          picture inside the pin. Left out, the tick box would be a control that does
          nothing on exactly the surface it was built for. `iconFor` and not `cat.icon`,
          so a marker also repaints when an icon finishes loading or fails to. */
+      /* Two tokens, not one: a glyph icon and a whole-marker `art` are independent,
+         and `art` in particular arrives LATE - the pin is drawn from the built-in
+         teardrop first and swapped when the image decodes. Left out of the signature
+         that swap never reaches the SDK and the artwork looks like it did not load,
+         on exactly the surface it was built for. */
       const art = single ? (iconFor(catById[s.cat]) || '') : '';
-      const sig = [pinStyle, catMode, art, pos.lat, pos.lng, colour, scale, selIn, g.count, canDrag,
+      const artv = single ? (artOk(catById[s.cat]) ? catById[s.cat].art.art.length : 0) : 0;
+      const sig = [pinStyle, catMode, art, artv, pos.lat, pos.lng, colour, scale, selIn, g.count, canDrag,
                    vague, stale, mix.map(x => x.id + ':' + x.count).join(','), title].join('|');
 
       let m = markers.get(key);
@@ -1619,21 +1717,44 @@ const SAMPLE_ART = {
   petshop: 'data:image/svg+xml;base64,this-is-not-an-image',
 };
 
+/* The tick box applies to WHICHEVER palette is on screen. It used to drive the sample
+   artwork on store types only, which was fine while that was the only artwork there
+   was - but with your real pins loaded and the map coloured by status, the same box
+   would have sat there doing nothing on the one view you actually use. A control that
+   does nothing in the default mode is worse than no control. */
 $('artBox').onchange = e => {
   const on = e.target.checked;
-  RESOLVED_TYPES.forEach(t => { t.icon = on ? SAMPLE_ART[t.id] : undefined; });
-  ICON_STATE.clear();
-  /* Redraw only AFTER the images have been asked to load and have answered. Painting
-     first and re-painting on each onload would flash the built-in shape and then swap
-     it, and on the Google surface every swap is a marker rebuild. */
-  checkIcons(RESOLVED_TYPES, () => {
-    const bad = RESOLVED_TYPES.filter(t => t.icon && ICON_STATE.get(t.id) !== 'ok');
-    $('artNote').textContent = !on ? '' :
-      `Custom artwork on ${RESOLVED_TYPES.filter(t => ICON_STATE.get(t.id) === 'ok').length} types.`
-      + (bad.length ? ` ${bad.map(t => t.label).join(', ')} did not load — drawn with the built-in shape instead of being dropped.` : '');
+  const finish = note => {
+    $('artNote').textContent = note;
     if (pinStyle !== 'icon') { pinStyle = 'icon'; $('iconBox').checked = true; }
     renderLegend();
     recompute();
+  };
+  /* Redraw only AFTER the images have been asked to load and have answered. Painting
+     first and re-painting on each onload would flash the built-in shape and then swap
+     it, and on the Google surface every swap is a marker rebuild. */
+  if (catMode === 'status' && PIN_ART) {
+    STATUS_CATEGORIES.forEach(c => {
+      const a = PIN_ART[c.id];
+      if (a && a.art) c.art = on ? a : undefined;
+    });
+    ART_STATE.clear();
+    checkArt(STATUS_CATEGORIES, () => {
+      const good = STATUS_CATEGORIES.filter(artOk);
+      const bad = STATUS_CATEGORIES.filter(c => c.art && !artOk(c));
+      finish(!on ? 'Built-in pins. Tick the box to put your own artwork back.'
+        : `Your artwork on ${good.length} of ${good.length + bad.length}: ${good.map(c => c.label).join(', ')}.`
+          + (bad.length ? ` ${bad.map(c => c.label).join(', ')} did not load — drawn with the built-in shape instead of being dropped.` : ''));
+    });
+    return;
+  }
+  RESOLVED_TYPES.forEach(t => { t.icon = on ? SAMPLE_ART[t.id] : undefined; });
+  ICON_STATE.clear();
+  checkIcons(RESOLVED_TYPES, () => {
+    const bad = RESOLVED_TYPES.filter(t => t.icon && ICON_STATE.get(t.id) !== 'ok');
+    finish(!on ? '' :
+      `Custom artwork on ${RESOLVED_TYPES.filter(t => ICON_STATE.get(t.id) === 'ok').length} types.`
+      + (bad.length ? ` ${bad.map(t => t.label).join(', ')} did not load — drawn with the built-in shape instead of being dropped.` : ''));
   });
 };
 $('undoBtn').onclick = undoMove;
@@ -1801,6 +1922,27 @@ if (REAL) {
 } else {
   log('Loaded 24 demo stores');
 }
+
+/* Swap the drawn pins for your artwork once it has actually decoded - and say which
+   ones did, by name. "Custom pins are on" is a claim about a checkbox; "3 of 3
+   loaded" is a claim about the map. */
+checkArt(STATUS_CATEGORIES, () => {
+  const ok = STATUS_CATEGORIES.filter(artOk);
+  const bad = STATUS_CATEGORIES.filter(c => c.art && !artOk(c));
+  if (ok.length) {
+    log(`Your pin artwork loaded on ${ok.length} of ${ok.length + bad.length}: ` +
+        ok.map(c => c.label).join(', '));
+    /* Ticked, because it is on. A box that says your artwork is available while the
+       map is already drawing it is a box that disagrees with the screen. */
+    $('artBox').checked = true;
+    $('artNote').textContent =
+      `Your artwork on ${ok.length} of ${ok.length + bad.length}: ${ok.map(c => c.label).join(', ')}. ` +
+      `Untick to compare against the built-in pins.`;
+    renderLegend();
+    recompute();
+  }
+  bad.forEach(c => log(`Artwork for "${c.label}" did not decode - drawn pin kept`));
+});
 </script>
 </body>
 </html>
