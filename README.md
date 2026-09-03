@@ -35,7 +35,7 @@ The selection engine is identical in both modes; only the tiles change.
 
 ```
 node test-selection.js        # 32 assertions on the selection + clustering engines
-python3 test_ui.py            # 114 assertions driving the real browser + screenshots
+python3 test_ui.py            # 122 assertions driving the real browser + screenshots
 python3 test_gmaps_surface.py # 62 assertions on the GOOGLE surface, with no API key
 node server/test_export.js    # 21 assertions on what each export is allowed to carry
 python3 tools/build-pin-art.py artwork --check   # pin-art.js still matches artwork/
@@ -46,7 +46,7 @@ node server/test_batch.js     # 53 assertions on the bulk geocoding run (real My
 node server/test_ventas.js    # 60 assertions against YOUR schema and YOUR 2,657 rows
 ```
 
-499 assertions. `test_ventas.js` is the one that matters most, because it is the
+507 assertions. `test_ventas.js` is the one that matters most, because it is the
 only suite whose inputs I did not choose — it runs over your actual data, and every
 correction listed under "Your actual database, measured" below was forced by it.
 
@@ -856,9 +856,12 @@ gives exactly three buckets:
 
 | Category | Colour | Count |
 |---|---|---|
-| Active store | green | 1,132 |
-| Potential | amber | 1,253 |
-| Inactive store | grey | 38 |
+| Active store | dark blue `#001db1` | 1,132 |
+| Potential | grey `#868686` | 1,253 |
+| Inactive store | turquoise `#399fc1` | 38 |
+
+(Those are your own pin colours, sampled from the artwork you sent. Before that they
+were green / amber / grey — this table said so for longer than it was true.)
 
 There is deliberately **no Chain category**. Nothing in the schema says which stores
 are chains — that was going to come from the spreadsheet you are cleaning up. A
@@ -1015,9 +1018,9 @@ with that category's own shape inside it.
 
 | category | colour | shape |
 |---|---|---|
-| Active store | green | shopping bag |
-| Potential | amber | star |
-| Inactive store | grey | cross |
+| Active store | dark blue | your PüRa pin (shopping bag without artwork) |
+| Potential | grey | your empty pin (star without artwork) |
+| Inactive store | turquoise | your empty pin (cross without artwork) |
 
 The shape lives in the category definition, next to the colour:
 

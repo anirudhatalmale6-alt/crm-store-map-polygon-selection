@@ -530,8 +530,11 @@ const mk = (name, cat, lat, lng, src = 'geocoded', prec = 'ROOFTOP', stype = nul
 
 /* Deliberately NOT one of the three category colours, and not the white used for
    "selected". An imprecise pin is already drawn as a dashed hollow circle in its own
-   category colour, so a dashed amber ring would be indistinguishable from an
-   imprecise Potential store at a glance. Solid ring, colour of its own. */
+   category colour, so a ring in a category colour would be indistinguishable from an
+   imprecise store of that category at a glance. Solid ring, pink, a colour used for
+   nothing else on the map. Say PINK anywhere this is described: the value below has
+   been pink for a while and the comments were still calling it amber, which is how a
+   legend ends up naming a colour the map does not draw. */
 const STALE_COLOR = '#ff7ad9';
 /* The fill for a bubble holding more than one category. It is deliberately in NO
    category: the previous value was #8b97a6, which is the Inactive colour to the
@@ -1232,7 +1235,7 @@ const OfflineSurface = (() => {
         // A pin Google was unsure about is drawn hollow: same colour so you can
         // still read its category, but obviously unfinished.
         const vague = isVague(s);
-        // A pin whose address was edited gets an amber ring: it is not vague, it is
+        // A pin whose address was edited gets a pink ring: it is not vague, it is
         // provably on the wrong street until somebody re-geocodes or confirms it.
         const stale = isStale(s);
         if (pinStyle === 'icon') {

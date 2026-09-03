@@ -474,6 +474,24 @@ with sync_playwright() as p:
     ok("control positive: the box really did cover every store",
        same["grouped"] == same["total"], same)
 
+    # ---------- the words used for a colour must match the colour ----------
+    # STALE_COLOR was changed to pink at some point and the comments, the README and
+    # very nearly the customer-facing legend all went on calling it "amber". Nobody
+    # notices, because nothing tests prose - and a legend that names a colour the map
+    # does not draw sends someone hunting for a ring that is not there.
+    colours = page.evaluate("""() => ({ stale: STALE_COLOR, wrong: WRONG_COLOR,
+                                        mixed: MIXED_FILL })""")
+    named = {"stale": "#ff7ad9", "wrong": "#ff6b6b"}
+    for key, want in named.items():
+        ok(f"{key} ring is still the colour the docs describe ({want})",
+           colours[key].lower() == want, colours)
+    # And no state colour may collide with a category colour, or two different things
+    # look identical on the map.
+    cats = page.evaluate("() => CATEGORIES.map(c => c.color.toLowerCase())")
+    clash = [k for k, v in colours.items() if v and v.lower() in cats]
+    ok("no state colour collides with a category colour", not clash,
+       {"clash": clash, "cats": cats, "state": colours})
+
     # Select a big chunk of the city and time it, unclustered = worst case.
     box = page.locator("#offline").bounding_box()
     page.click("#drawBtn")
