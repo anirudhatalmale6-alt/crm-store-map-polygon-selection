@@ -38,6 +38,7 @@ node test-selection.js        # 32 assertions on the selection + clustering engi
 python3 test_ui.py            # 143 assertions driving the real browser + screenshots
 python3 test_gmaps_surface.py # 69 assertions on the GOOGLE surface, with no API key
 node server/test_export.js    # 21 assertions on what each export is allowed to carry
+node server/test_regeocode.js # 14 assertions on when a second opinion may move a pin
 python3 tools/build-pin-art.py artwork --check   # pin-art.js still matches artwork/
 node server/test_schema.js    # 42 assertions on the table/column config (no database)
 node server/test_geocoder.js  # 26 assertions on the geocoder (stubbed fetch, no cost)
@@ -46,7 +47,7 @@ node server/test_batch.js     # 53 assertions on the bulk geocoding run (real My
 node server/test_ventas.js    # 60 assertions against YOUR schema and YOUR 2,657 rows
 ```
 
-535 assertions. `test_ventas.js` is the one that matters most, because it is the
+549 assertions. `test_ventas.js` is the one that matters most, because it is the
 only suite whose inputs I did not choose — it runs over your actual data, and every
 correction listed under "Your actual database, measured" below was forced by it.
 
