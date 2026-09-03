@@ -1642,6 +1642,9 @@ const GoogleSurface = (() => {
       { lat: b.minLat, lng: b.minLng }, { lat: b.maxLat, lng: b.maxLng }), 24);
     // Clustering depends on zoom, so re-cluster whenever the view settles.
     google.maps.event.addListener(map, 'idle', render);
+    /* Exposed so a screenshot script can drive the real basemap to a named store and
+       photograph it. Nothing on the page reads this. */
+    window.__map = map;
 
     /* Polygon drawing, done by hand rather than with google.maps.drawing.
      *
