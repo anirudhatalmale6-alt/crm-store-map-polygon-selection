@@ -148,7 +148,7 @@ with sync_playwright() as p:
     ok("nothing is stale yet, so this list is purely about precision",
        page.evaluate("stores.every(s => !isStale(s))"))
 
-    page.check("#reviewBox")
+    page.select_option("#reviewMode", "only")
     shown_names = sorted(page.evaluate("visibleStores().map(s => s.name)"))
     ok("the filter shows exactly the flagged pins", shown_names == flagged,
        f"ui={shown_names} want={flagged}")
@@ -159,8 +159,49 @@ with sync_playwright() as p:
        all(c.get_attribute("fill") == "none"
            for c in page.query_selector_all("#offline svg circle.pin")))
     shot("9-needs-review.png")
-    page.uncheck("#reviewBox")
-    ok("unticking restores every pin",
+
+    # ---------- "Hide pins to check" ----------
+    # His words: "sometime is better to avoid unsecure pins and we might want to avoid
+    # them". Avoiding them means they must not come back in the EXPORT either - hiding
+    # a pin on screen while still writing it to the CSV would be worse than no filter,
+    # because he would post to those addresses believing he had excluded them.
+    all_names = page.evaluate("stores.map(s => s.name)")
+    page.select_option("#reviewMode", "hide")
+    kept = sorted(page.evaluate("visibleStores().map(s => s.name)"))
+    ok("hiding shows exactly the pins that are NOT flagged",
+       kept == sorted(set(all_names) - set(flagged)), f"ui={kept}")
+    ok("the two modes are exact complements — no store falls through either",
+       sorted(kept + flagged) == sorted(all_names))
+    ok("and the map draws only the kept ones",
+       len(page.query_selector_all("#offline svg circle.pin")) == len(kept))
+    # data-sid is a STRING and store ids are NUMBERS, so this has to coerce. Written
+    # with === it silently compared against undefined and threw inside needsReview.
+    ok("every drawn pin still resolves to a real store",
+       page.evaluate("[...document.querySelectorAll('#offline svg [data-sid]')]"
+                     ".every(e => stores.some(s => String(s.id) === e.dataset.sid))"))
+    ok("no hidden pin is left drawn under another name",
+       page.evaluate("[...document.querySelectorAll('#offline svg [data-sid]')]"
+                     ".every(e => !needsReview(stores.find(s => String(s.id) === e.dataset.sid)))"))
+
+    # The leak that a rendering-only filter would have: select everything, then read
+    # what the CSV would actually contain.
+    page.evaluate("polygon = OfflineSurface.bounds ? "
+                  "[{lat:-89,lng:-179},{lat:-89,lng:179},{lat:89,lng:179},{lat:89,lng:-179}] : polygon;"
+                  "recompute();")
+    sel_csv = page.evaluate("csvOf(stores.filter(s => selectedIds.has(s.id)))")
+    ok("a whole-world polygon selects only the kept pins",
+       page.evaluate("selectedIds.size") == len(kept), page.evaluate("selectedIds.size"))
+    ok("and NO flagged store appears anywhere in the CSV text",
+       not any(n in sel_csv for n in flagged), [n for n in flagged if n in sel_csv][:3])
+    # Control positive: with the filter off, that same polygon DOES export them.
+    page.select_option("#reviewMode", "all")
+    page.evaluate("recompute()")
+    all_csv = page.evaluate("csvOf(stores.filter(s => selectedIds.has(s.id)))")
+    ok("control positive: with the filter off the same polygon exports them",
+       all(n in all_csv for n in flagged), [n for n in flagged if n not in all_csv][:3])
+    page.evaluate("polygon = []; selectedIds = new Set(); recompute();")
+
+    ok("going back to Show all restores every pin",
        len(page.query_selector_all("#offline svg circle.pin")) == total,
        len(page.query_selector_all("#offline svg circle.pin")))
 
@@ -450,6 +491,23 @@ with sync_playwright() as p:
     ok("...and it sits with the polygon buttons, where it is wanted",
        vis["nearPolygonButton"], vis)
 
+    # Same test for the review filter, for the same reason. Its natural home is the
+    # "Pins worth checking" section, which measured 1,552px down a 665px panel - and he
+    # has already told me once that a control down there is a "very hidden position".
+    rv = page.evaluate("""() => {
+      const els = [...document.querySelectorAll('#reviewMode')];
+      const r = els[0].getBoundingClientRect();
+      return { copies: els.length,
+               onScreen: r.top >= 0 && r.bottom <= innerHeight
+                      && r.left >= 0 && r.right <= innerWidth,
+               nearPolygonButton: Math.abs(
+                 r.top - document.getElementById('drawBtn').getBoundingClientRect().top) < 40 };
+    }""")
+    ok("the review filter is on screen without scrolling", rv["onScreen"], rv)
+    ok("...and sits with the polygon buttons", rv["nearPolygonButton"], rv)
+    # One control, one place: two of them would drift and show different modes.
+    ok("...and there is exactly one of it on the page", rv["copies"] == 1, rv)
+
     # Grouping is a DISPLAY choice. If it ever changed what a polygon selects, the
     # count in the panel would depend on a checkbox about pictures - so both modes are
     # run over the same polygon and compared.
@@ -596,10 +654,10 @@ with sync_playwright() as p:
       const len = svg => (svg.match(/<circle/g) || []).length;
       const w = svg => [...svg.matchAll(/stroke-width="([\\d.]+)"/g)]
                         .reduce((a, m) => a + Number(m[1]), 0);
-      const was = reviewOnly;
-      reviewOnly = false; const quiet = pinSvg(c, { hollow: true });
-      reviewOnly = true;  const loud  = pinSvg(c, { hollow: true });
-      reviewOnly = was;
+      const was = reviewMode;
+      reviewMode = 'all';  const quiet = pinSvg(c, { hollow: true });
+      reviewMode = 'only'; const loud  = pinSvg(c, { hollow: true });
+      reviewMode = was;
       const plain = pinSvg(c);
       ART_STATE.delete('__ring');
       return { quietRings: len(quiet) - len(plain), loudRings: len(loud) - len(plain),
@@ -714,7 +772,7 @@ with sync_playwright() as p:
     # here is the handle: pins are dragged by looking the store up from data-sid, so a
     # pin drawn without one is a pin nobody can move any more.
     page.uncheck("#clusterBox")
-    page.uncheck("#reviewBox")
+    page.select_option("#reviewMode", "all")
     singles = page.evaluate("visibleStores().length")
     page.check("#iconBox")
     icons = page.evaluate("""() => {

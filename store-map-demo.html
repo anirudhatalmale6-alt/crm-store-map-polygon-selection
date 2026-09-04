@@ -216,8 +216,11 @@
 
     <div class="section">
       <h2>Pins worth checking</h2>
+      <!-- The CONTROL lives in the map toolbar, where it can be found. This section
+           keeps the count and the explanation only: one control, one place, so the two
+           can never show different modes. -->
       <label style="display:flex;align-items:center;gap:7px;font-size:12.5px">
-        <input type="checkbox" id="reviewBox"> Show only these
+        <span>Pins Google was unsure about</span>
         <span class="count" id="reviewCount">0</span>
       </label>
       <p class="hint" id="reviewNote"></p>
@@ -242,6 +245,17 @@
       <button class="ghost" id="clearBtn">Clear selection</button>
       <label class="tool-toggle" title="Merge pins that sit on top of each other into one numbered bubble">
         <input type="checkbox" id="clusterBox" checked> Group nearby pins
+      </label>
+      <!-- Here and NOT in the sidebar section it belongs to, which sits 1,552px down a
+           665px panel. He has already told me once that a control down there is "very
+           hidden position"; the same mistake twice is a choice. It lives in exactly one
+           place so the two can never disagree about the current mode. -->
+      <label class="tool-toggle" title="Leave the pins Google was unsure about off the map, out of any selection, and out of the CSV">
+        <select id="reviewMode">
+          <option value="all">All pins</option>
+          <option value="only">Only pins to check</option>
+          <option value="hide">Hide pins to check</option>
+        </select>
       </label>
     </div>
     <!-- pointer-events:none, or this floating strip eats clicks meant for the map -->
@@ -713,7 +727,7 @@ function artPin(cat, o = {}) {
      It gets loud again in "Pins worth checking", because there the marked ones are the
      entire subject and everything else has been filtered away. Same information, weight
      matched to whether you are looking at the map or working through the list. */
-  const loud = reviewOnly;
+  const loud = reviewMode === 'only';
   const halo = (o.stroke ? ring(o.stroke) : '')
     + (o.hollow ? (loud ? ring(colorOf(cat), '2.6 2.2', 1.8, 1.1)
                         : ring(colorOf(cat), '1.5 2.3', 1.0, 0.3, .85)) : '');
@@ -984,7 +998,9 @@ let polygon = [];      // [{lat,lng}]
 let selectedIds = new Set();
 let drawing = false;
 let hidden = new Set(); // category ids toggled off
-let reviewOnly = false;  // show only the pins Google was unsure about
+/* 'all' | 'only' | 'hide'. Defaults to 'all', which is what the map did before this
+   setting existed - a new option must not quietly change what an untouched map shows. */
+let reviewMode = 'all';
 /* Default is the dot style this map already shipped with: turning icons on is the new
    behaviour, so it has to be asked for. A new default that redraws every pin would be
    a change nobody requested. */
@@ -1028,9 +1044,21 @@ function fillCatSelect() {
     .map(c => `<option value="${c.id}">${c.label}</option>`).join('');
 }
 
+/* THE one place that decides which stores exist as far as the rest of the page is
+   concerned. Everything downstream - what is drawn, what a polygon can catch, the
+   count, the list, and the CSV - reads the selection built from this, so a store
+   filtered out here cannot reappear in the export.
+
+   That last part is the whole point of "hide pins to check". A filter that only
+   stopped them being DRAWN would be worse than no filter at all: he would polygonise
+   a region believing he had excluded the unreliable addresses, and then post to them
+   anyway off the back of a CSV that never heard about the setting. */
 function visibleStores() {
-  return stores.filter(s => !hidden.has(s.cat) && (!reviewOnly || needsReview(s)));
+  return stores.filter(s => !hidden.has(s.cat) && reviewFilter(s));
 }
+const reviewFilter = s => reviewMode === 'all' ? true
+                        : reviewMode === 'only' ? needsReview(s)
+                        : !needsReview(s);
 function reviewCount() { return stores.filter(needsReview).length; }
 
 function recompute() {
@@ -1332,10 +1360,17 @@ function manualCount() { return stores.filter(s => s.src === 'manual').length; }
 function renderReview() {
   const n = reviewCount();
   $('reviewCount').textContent = n;
-  $('reviewNote').textContent = n
-    ? `Google placed these on a street or a district rather than a building. Everything else it found exactly.`
-    : 'Nothing flagged - every pin was placed precisely.';
-  $('reviewBox').disabled = n === 0;
+  /* Says what the setting DOES to the rest of the page, not just how many are marked.
+     "Hidden" has to name the consequence for the export, because the whole reason to
+     hide them is to avoid contacting them, and a CSV is how that contact happens. */
+  $('reviewNote').textContent = !n
+    ? 'Nothing flagged - every pin was placed precisely.'
+    : reviewMode === 'hide'
+      ? `${n} pins hidden. They are also left out of anything you select and out of the CSV.`
+      : reviewMode === 'only'
+        ? `Showing only these ${n}. A polygon here selects nothing else.`
+        : 'Google placed these on a street or a district rather than a building. Everything else it found exactly.';
+  $('reviewMode').disabled = n === 0;
 }
 
 /* ------------------------------------------------------------------ *
@@ -2042,7 +2077,7 @@ $('artBox').onchange = e => {
   });
 };
 $('undoBtn').onclick = undoMove;
-$('reviewBox').onchange = e => { reviewOnly = e.target.checked; recompute(); };
+$('reviewMode').onchange = e => { reviewMode = e.target.value; recompute(); };
 
 $('bulkBtn').onclick = () => {
   // With the real export loaded there is nothing to simulate - the stress set exists

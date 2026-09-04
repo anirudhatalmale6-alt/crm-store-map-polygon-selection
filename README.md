@@ -1515,3 +1515,40 @@ changes as plain `UPDATE` statements, each keeping its `location_source <> 'manu
 guard, for whoever owns production to read and apply in their own window. Every answer
 Google gave is cached in `regeocode-cache.jsonl`, so re-running after a rule change
 costs nothing — the numbers above were re-derived three times without buying a request.
+
+## "Can you create an option to hide pins to check?"
+
+His reason: *"sometime is better to avoid unsecure pins and we might want to avoid
+them"* — the point is not tidiness, it is not contacting a store whose address is
+unreliable. So the setting had to reach further than the map.
+
+One control, three answers, in the map toolbar next to **Group nearby pins**:
+
+| | |
+|---|---|
+| All pins | 2,423 |
+| Only pins to check | 330 |
+| Hide pins to check | 2,093 |
+
+**It is not a rendering filter.** Everything downstream reads one funnel,
+`visibleStores()` — what is drawn, what a polygon can catch, the `total` badge, the
+right-hand list, and the CSV. A hidden store cannot come back in the export.
+
+That distinction is the whole feature. A filter that only stopped them being *drawn*
+would be worse than none: he would draw a polygon believing he had excluded the
+unreliable addresses, and then post to them anyway off a CSV that never heard about the
+setting. The test drops a polygon over the whole world, exports it, and asserts no
+flagged store appears anywhere in the CSV text — with a control positive that the same
+polygon **does** export them when the filter is off. Rewiring selection to read the
+unfiltered list makes both fail, by name.
+
+The Google surface is checked separately: a hidden store must have no **marker**, not
+merely no `<circle>`. On the first attempt that check passed while reading zero markers
+— a negative assertion satisfying itself on an empty map. The control positive now
+asserts the flagged pins are on the map *before* hiding, so the subtraction means
+something.
+
+**Where it lives.** Its natural home is the "Pins worth checking" section — which
+measures 1,552px down a 665px panel. He has already told me once that a control down
+there is a "very hidden position", so it went in the toolbar instead, and a test now
+asserts it is on screen without scrolling and that there is exactly one of it.

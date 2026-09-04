@@ -540,6 +540,49 @@ with sync_playwright() as p:
     page.uncheck("#iconBox")
     page.select_option("#catMode", "status")
 
+    # ---------- "Hide pins to check", on the surface he actually uses ----------
+    # The offline suite proves the filter funnel. This proves the Google surface drinks
+    # from it: a hidden store must have no MARKER on the map, not merely no <circle>.
+    # Clustering off, so one live marker is exactly one store and the arithmetic below
+    # is not counting bubbles. Liveness in the stub is !_gone - there is no getMap().
+    page.uncheck("#clusterBox")
+    live = lambda: page.evaluate("window.__stub.markers.filter(m => !m._gone).length")
+    # Which stores are on the map, matched back by position.
+    on_map = lambda: page.evaluate("""() => window.__stub.markers.filter(m => !m._gone)
+        .map(m => { const p = m.position || m.getPosition && m.getPosition();
+                    const la = typeof p.lat === 'function' ? p.lat() : p.lat;
+                    const ln = typeof p.lng === 'function' ? p.lng() : p.lng;
+                    const s = stores.find(x => Math.abs(x.lat - la) < 1e-9
+                                            && Math.abs(x.lng - ln) < 1e-9);
+                    return s ? s.name : null; }).filter(Boolean)""")
+
+    page.select_option("#reviewMode", "all")
+    page.evaluate("recompute()")
+    n_all, named_all = live(), on_map()
+    flagged = page.evaluate("stores.filter(needsReview).map(s => s.name)")
+    # Control positive FIRST, and about the markers - not about the store data. Without
+    # it, "no flagged marker survives" passes for free on an empty map, which is exactly
+    # what it did on the first attempt: live() was 0 and two assertions went green.
+    ok("control positive: flagged stores really are on the map before hiding",
+       n_all > 0 and any(n in named_all for n in flagged),
+       f"markers={n_all} flagged={len(flagged)}")
+
+    page.select_option("#reviewMode", "hide")
+    page.evaluate("recompute()")
+    named_hidden = on_map()
+    ok("hiding removes exactly the flagged pins from the Google map",
+       len(named_all) - len(named_hidden) == len(flagged),
+       f"all={len(named_all)} hidden={len(named_hidden)} flagged={len(flagged)}")
+    ok("no marker left on the map belongs to a flagged store",
+       not any(n in named_hidden for n in flagged),
+       [n for n in flagged if n in named_hidden][:3])
+
+    page.select_option("#reviewMode", "all")
+    page.evaluate("recompute()")
+    ok("...and switching back puts every one of them on the map again",
+       sorted(on_map()) == sorted(named_all))
+    page.check("#clusterBox")
+
     # ---------- click a pin, get the store ----------
     # The customer asked for this instead of hovering and waiting for a tooltip. The
     # handler is FIRED for real rather than asserting addListener was called - a
